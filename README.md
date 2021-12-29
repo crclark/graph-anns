@@ -42,6 +42,27 @@ There are a few performance considerations for this experiment:
 2. If we ignore IO and memory bandwidth, doing exhaustive search for the nearest neighbor of a single query vector will take `n*(distance_compute + compare_distance)` = `n*(3*d + 1)` (euclidean distance is one subtract, one multiply, one addition for each dimension) operations. For a billion 128-d query vectors, that's 385 billion operations. The 1950X can do about 1.2 TFLOPs, which means that it can theoretically do an exhaustive search in about 300ms. We can see why Faiss's design emphasizes compact binary representations of vectors that are amenable to fast intrinsics -- if you can keep a lot of the dataset as close to the CPU as possible by using a more compact encoding, you can increase throughput even further.
 3. Given the above thoughts and considerations, we can see that if we use brute force, the best throughput for nearest-neighbor queries we could hope for is maybe 3 QPS.
 
+### First results
+
+On commit dc0c7bcff7bd81b64cab9fde61ae4f8bf48f60f3
+
+```
+time ./search b 1 128 2 /mnt/970pro/anns/bigann_base.bvecs_array /mnt/970pro/anns/bigann_query.bvecs_array_one_point
+```
+
+takes about 30 seconds to mmap the file, then about 100 seconds to search for the 2 nearest neighbors of one point.
+
+Running it repeatedly, it gets faster (as expected since the file is still in the page cache). The fastest output I get from `time` is 23 seconds. Note that this is single-threaded at this point. If we naively assume perfect parallelism, dividing by 32 is about 720ms to search the entire thing... not too far from our back-of-the-napkin estimate! Or going by my estimate above of 385 billion integer ops, that's 16.7 billion ops/second on one core.
+
+... And then I realized that constant overflows in the arithmetic were giving us
+bad results, and fixed it by casting to float first, which caused our speed to degrade to 158 seconds, meaning that my estimate was off by an order of magnitude. Drat.
+
+New command:
+
+```
+time ./search b 1 128 1000 /mnt/970pro/anns/bigann_base.bvecs_array /mnt/970pro/anns/bigann_query.bvecs_array_one_point /mnt/970pro/anns/gnd/idx_1000M.ivecs_array /mnt/970pro/anns/gnd/dis_1000M.fvecs_array
+```
+
 ## Abandoned attempt 1: hilbert-curve based method
 
 I abandoned this one because it's really difficult to work with space-filling curves -- no good implementations of n-dimensional Hilbert curves *with bounding box support* can be found. Without a function to map a bounding box to segments of the Hilbert curve, I can't be sure when I have exhaustively searched all points within a given radius.
