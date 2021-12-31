@@ -1,3 +1,6 @@
 .vscode/
 .stack-work/
 *~
+
+graph-anns/debug/
+graph-anns/target/

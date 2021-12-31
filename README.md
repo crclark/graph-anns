@@ -63,6 +63,26 @@ New command:
 time ./search b 1 128 1000 /mnt/970pro/anns/bigann_base.bvecs_array /mnt/970pro/anns/bigann_query.bvecs_array_one_point /mnt/970pro/anns/gnd/idx_1000M.ivecs_array /mnt/970pro/anns/gnd/dis_1000M.fvecs_array
 ```
 
+## Slightly original idea: search graph
+
+After reading many good papers about monotonic search networks, I became reasonably certain that I could write something relatively performant by taking that approach.
+
+There is an excellent recent survey paper [here](https://arxiv.org/pdf/2101.12631). Also of use are the [navigating spreading out graph](https://arxiv.org/pdf/1707.00143) and [satellite system graph](https://deepai.org/publication/satellite-system-graph-towards-the-efficiency-up-boundary-of-graph-based-approximate-nearest-neighbor-search) papers.
+
+To summarize, these approaches use a best-first search through a graph to move in (roughly) the direction of the query node in euclidean space. Ideally, the graphs would have the property that there always exists a path with monotonically decreasing distance from a root node to all nodes in the graph, but in practice, it's obviously difficult to create a graph that satisfies that constraint. Instead, they use various tricks to approximate it.
+
+The first step of the approximation is to build some simple starting graph. The three choices used in the literature are the Delaunay graph, k-nn graph, and minimum spanning tree. The k-nn graph is cheapest to approximate (using a simple local search heuristic), and the survey paper even shows that a worse approximation actually gives better search performance (possibly because it left some long range shortcuts, like contraction hierarchies?).
+
+The satellite system graph is interesting because for each node, it tries to select a set of neighbors that are in different directions from each other. It does so by saying that each selected neighbor is the only node within a cone centered on the edge connecting the two nodes in euclidean space. The angle of the cone is `2*alpha`, where `alpha` is a parameter of the algorithm. This ensures that the `m` neighbors selected for a given node are, ideally, in different directions so that it's more likely that we can navigate towards the query point from that node. What's interesting is that, thanks to [the law of cosines](https://www.geeksforgeeks.org/find-angles-given-triangle/), we can find the "angle" between points in any metric space, even if that metric space has no concept of coordinates. I have no idea if this is mathematically sane, but it seems like it could help us generalize the search graph concept to arbitrary metric spaces. That is, we could impose the same constraint on neighboring nodes being "in different directions" by computing the angle between two candidate neighbors.
+
+The survey paper complains that the papers in this area tend to follow the same general schema, but swap in multiple novel steps, fail to describe which of the novel steps actually improved performance, benchmark on a small number of datasets, and proclaim victory. In the spirit of continuing the tradition the survey paper complains of, I propose trying all these new things simultaneously:
+
+1. Generalize to arbitrary metric spaces and maybe optimize the neighbor set by computing angles between neighbors (see above).
+2. Use a k-nn graph, but obtain global connectivity by building a TSP-like permutation of the nodes as an additional set of edges to add to the graph. The local search will proceed by randomly swapping nodes in the permutation to try to minimize the distance between successive nodes.
+3. Other random stuff thrown in, as I think of it. Start the search from random nodes? Random restarts? Starting new requests at the terminal point of recent requests, to handle spikes in similar queries (kind of like a fuzzy form of caching)? Online insertion and deletion? Background index optimization?
+
+This will be implemented in Rust because I've been putting of learning it for too long.
+
 ## Abandoned attempt 1: hilbert-curve based method
 
 I abandoned this one because it's really difficult to work with space-filling curves -- no good implementations of n-dimensional Hilbert curves *with bounding box support* can be found. Without a function to map a bounding box to segments of the Hilbert curve, I can't be sure when I have exhaustively searched all points within a given radius.
