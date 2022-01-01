@@ -7,3 +7,7 @@ version = "0.1.0"
 
 [dependencies]
 memmap = "0.7.0"
+nix = "0.23.0"
+
+[profile.release]
+debug = true
