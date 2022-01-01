@@ -1,19 +1,20 @@
 #![feature(total_cmp)]
 extern crate memmap;
 extern crate nix;
-use nix::libc::c_void;
 use nix::sys::mman::{mmap, MapFlags, ProtFlags};
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
 use std::convert::TryInto;
 use std::fs::File;
 use std::os::unix::io::IntoRawFd;
+use std::thread;
+use std::time::Instant;
 
 // A handle to a file in the bvecs_array, ivecs_array, or fvecs_array format on
 // disk. The file is mmaped. The associated functions are used to read vectors
 // from the file.
+#[derive(Debug, Clone, Copy)]
 struct Vecs<'a, T> {
-  _mmap: *mut c_void, // segfaults unless we carry this around.
   pub num_rows: usize,
   pub num_dim: usize,
   buffer: &'a [T],
@@ -32,9 +33,8 @@ impl<'a, T> Vecs<'_, T> {
       .try_into()
       .unwrap();
     let num_rows = filesize / (num_dim * std::mem::size_of::<T>());
-    //let _mmap = unsafe { memmap::MmapOptions::new().map(&f) }.expect("mmap failed");
-    let _mmap = unsafe {
-      mmap(
+    let buffer = unsafe {
+      let mmap = mmap(
         std::ptr::null_mut(),
         filesize,
         ProtFlags::PROT_READ,
@@ -42,11 +42,10 @@ impl<'a, T> Vecs<'_, T> {
         f.into_raw_fd(),
         0,
       )
-      .expect("mmap failed")
+      .expect("mmap failed");
+      std::slice::from_raw_parts(mmap as *const T, num_rows * num_dim)
     };
-    let buffer = unsafe { std::slice::from_raw_parts(_mmap as *const T, num_rows * num_dim) };
     Ok(Self {
-      _mmap,
       num_rows,
       num_dim,
       buffer,
@@ -91,8 +90,8 @@ impl Ord for SearchResult {
 }
 
 fn search_range<'a, T>(
-  query_set: Vecs<'a, T>,
-  db: Vecs<'a, T>,
+  query_set: &Vecs<'a, T>,
+  db: &Vecs<'a, T>,
   k: usize,
   lower_bound_incl: usize,
   upper_bound_excl: usize,
@@ -114,22 +113,6 @@ fn search_range<'a, T>(
   }
   nearest_neighbors
 }
-
-/*
-fn mainold() {
-  let base_vecs = Vecs::<f32>::new(
-    "/mnt/970pro/anns/siftsmall/siftsmall_learn.fvecs_array",
-    128,
-  )
-  .unwrap();
-  let query_vecs = Vecs::<f32>::new(
-    "/mnt/970pro/anns/siftsmall/siftsmall_query.fvecs_array_one_point",
-    128,
-  )
-  .unwrap();
-  search_range(query_vecs, base_vecs, 1000, 0, 25000, sq_euclidean);
-}
-*/
 
 trait PrimitiveToF32 {
   fn tof32(self) -> f32;
@@ -163,34 +146,44 @@ fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(v1: &[T], v2: &[T]) -> f32 {
   result
 }
 
-fn sq_euclidean_slower<T: PrimitiveToF32 + Copy + Into<f32>>(v1: &[T], v2: &[T]) -> f32 {
-  let mut result = 0.0;
-  let n = v1.len();
-  for i in 0..n {
-    let diff: f32 = v2[i].into() - v1[i].into();
-    result += diff * diff;
-  }
-  result
-}
-
-//same performance as sq_euclidean_faster
-fn sq_euclidean_with_zip<T: PrimitiveToF32 + Copy + Into<f32>>(v1: &[T], v2: &[T]) -> f32 {
-  v1.iter()
-    .zip(v2.iter())
-    .map(|(x, y)| ((x.tof32()) - (y.tof32())) * ((x.tof32()) - (y.tof32())))
-    .fold(0.0, ::std::ops::Add::add)
-}
-
 fn main() {
+  let start = Instant::now();
   let base_vecs = Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128).unwrap();
   let query_vecs =
     Vecs::<u8>::new("/mnt/970pro/anns/bigann_query.bvecs_array_one_point", 128).unwrap();
-  search_range(
-    query_vecs,
-    base_vecs,
-    1000,
-    0,
-    999999999,
-    sq_euclidean_faster,
-  );
+  println!("Loaded dataset in {:?}", start.elapsed());
+
+  let mut handles = Vec::new();
+  let num_threads = 32;
+  let k = 1000;
+
+  let mut lower_bound = 0;
+  let rows_per_thread = base_vecs.num_rows / num_threads;
+  for i in 0..num_threads {
+    let lower_bound_clone = lower_bound.clone();
+    let upper_bound = if i == num_threads - 1 {
+      base_vecs.num_rows
+    } else {
+      lower_bound + rows_per_thread
+    };
+    println!(
+      "Launching thread {} to search from {} to {}",
+      i, lower_bound, upper_bound
+    );
+    handles.push(thread::spawn(move || {
+      search_range(
+        &query_vecs,
+        &base_vecs,
+        k,
+        lower_bound_clone,
+        upper_bound,
+        sq_euclidean_faster,
+      );
+    }));
+    lower_bound += rows_per_thread;
+  }
+
+  for handle in handles {
+    handle.join().unwrap();
+  }
 }
