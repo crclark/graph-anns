@@ -1,4 +1,6 @@
 #![feature(total_cmp)]
+extern crate nix;
+
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
 use std::thread;
