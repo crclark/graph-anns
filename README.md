@@ -63,6 +63,71 @@ New command:
 time ./search b 1 128 1000 /mnt/970pro/anns/bigann_base.bvecs_array /mnt/970pro/anns/bigann_query.bvecs_array_one_point /mnt/970pro/anns/gnd/idx_1000M.ivecs_array /mnt/970pro/anns/gnd/dis_1000M.fvecs_array
 ```
 
+#### Rust version
+
+See commit d15eef7f5d32a0869e80596c1b90018c1864d352 and graph-anns/ to see the Rust translation of the above brute force code. It's equal in speed to C++. Interestingly, I discovered that MAP_POPULATE is significantly slower than omitting it. That makes no sense to me at all... wouldn't we avoid pipeline stalls if we pre-populate all the pages?
+
+#### Rust version no MAP_POPULATE
+
+`/usr/bin/time -v cargo run --release`
+
+```
+	Command being timed: "cargo run --release"
+	User time (seconds): 292.56
+	System time (seconds): 59.18
+	Percent of CPU this job got: 1320%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:26.63
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 115413560
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 63
+	Minor (reclaiming a frame) page faults: 2176874
+	Voluntary context switches: 206329
+	Involuntary context switches: 45831
+	Swaps: 0
+	File system inputs: 60900952
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+```
+
+#### Rust version with MAP_POPULATE
+
+```
+	Command being timed: "cargo run --release"
+	User time (seconds): 298.30
+	System time (seconds): 69.01
+	Percent of CPU this job got: 509%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:12.04
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 115583888
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 254
+	Minor (reclaiming a frame) page faults: 3591142
+	Voluntary context switches: 453967
+	Involuntary context switches: 38958
+	Swaps: 0
+	File system inputs: 176273032
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+```
+
+Conclusion: MANY more major and minor page faults. However, would it be faster
+if we are doing multiple passes over the data?
+
 ## Slightly original idea: search graph
 
 After reading many good papers about monotonic search networks, I became reasonably certain that I could write something relatively performant by taking that approach.
@@ -71,7 +136,7 @@ There is an excellent recent survey paper [here](https://arxiv.org/pdf/2101.1263
 
 To summarize, these approaches use a best-first search through a graph to move in (roughly) the direction of the query node in euclidean space. Ideally, the graphs would have the property that there always exists a path with monotonically decreasing distance from a root node to all nodes in the graph, but in practice, it's obviously difficult to create a graph that satisfies that constraint. Instead, they use various tricks to approximate it.
 
-The first step of the approximation is to build some simple starting graph. The three choices used in the literature are the Delaunay graph, k-nn graph, and minimum spanning tree. The k-nn graph is cheapest to approximate (using a simple local search heuristic), and the survey paper even shows that a worse approximation actually gives better search performance (possibly because it left some long range shortcuts, like contraction hierarchies?).
+The first step of the approximation is to build some simple starting graph. The three choices used in the literature are the Delaunay graph, k-nn graph, and minimum spanning tree. The k-nn graph is cheapest to approximate (using [a simple local search heuristic](https://www.ambuehler.ethz.ch/CDstore/www2011/proceedings/p577.pdf)), and the survey paper even shows that a worse approximation actually gives better search performance (possibly because it left some long range shortcuts, like contraction hierarchies?).
 
 The satellite system graph is interesting because for each node, it tries to select a set of neighbors that are in different directions from each other. It does so by saying that each selected neighbor is the only node within a cone centered on the edge connecting the two nodes in euclidean space. The angle of the cone is `2*alpha`, where `alpha` is a parameter of the algorithm. This ensures that the `m` neighbors selected for a given node are, ideally, in different directions so that it's more likely that we can navigate towards the query point from that node. What's interesting is that, thanks to [the law of cosines](https://www.geeksforgeeks.org/find-angles-given-triangle/), we can find the "angle" between points in any metric space, even if that metric space has no concept of coordinates. I have no idea if this is mathematically sane, but it seems like it could help us generalize the search graph concept to arbitrary metric spaces. That is, we could impose the same constraint on neighboring nodes being "in different directions" by computing the angle between two candidate neighbors.
 
