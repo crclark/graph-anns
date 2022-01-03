@@ -1,11 +1,15 @@
 #![feature(total_cmp)]
+extern crate atomic_float;
 extern crate nix;
+extern crate parking_lot;
+extern crate tinyset;
 
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
 use std::thread;
 use std::time::Instant;
 
+mod knn_graph;
 mod texmex;
 
 #[derive(Debug)]
