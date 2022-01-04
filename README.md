@@ -125,6 +125,34 @@ See commit d15eef7f5d32a0869e80596c1b90018c1864d352 and graph-anns/ to see the R
 	Exit status: 0
 ```
 
+#### Rust version with NO MAP_POPULATE, returning i32 distances
+
+```
+	Command being timed: "cargo run --release"
+	User time (seconds): 99.02
+	System time (seconds): 9.46
+	Percent of CPU this job got: 1797%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:06.03
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 125002900
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1957946
+	Voluntary context switches: 272
+	Involuntary context switches: 11118
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+```
+
 Conclusion: MANY more major and minor page faults. However, would it be faster
 if we are doing multiple passes over the data?
 
