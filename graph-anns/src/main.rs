@@ -51,6 +51,8 @@ fn search_range<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   k: usize,
   lower_bound_incl: usize,
   upper_bound_excl: usize,
+  // TODO: parametrize the type of the distances so we can use much faster
+  // i32 if possible.
   dist_fn: fn(&T, &T) -> f32,
 ) -> Vec<BinaryHeap<SearchResult>> {
   let mut nearest_neighbors = Vec::new();
