@@ -87,9 +87,12 @@ fn search_identity_elem(query_set_size: usize) -> Vec<BinaryHeap<SearchResult>> 
   nearest_neighbors
 }
 
-fn search_sum(mut v1: Vec<BinaryHeap<SearchResult>>, mut v2: Vec<BinaryHeap<SearchResult>>) -> Vec<BinaryHeap<SearchResult>> {
+fn search_sum(k: usize, mut v1: Vec<BinaryHeap<SearchResult>>, mut v2: Vec<BinaryHeap<SearchResult>>) -> Vec<BinaryHeap<SearchResult>> {
   for (x,y) in v1.iter_mut().zip(v2.iter_mut()) {
     x.append(y);
+    while x.len() > k {
+      x.pop().unwrap();
+    }
   }
   v1
 }
@@ -128,13 +131,15 @@ fn search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
   let nearest_neighbors =
       (0..db_size)
       .into_par_iter()
+      // NOTE: fold + reduce ensures that we don't get swamped with the overhead
+      // of allocating one billion BinaryHeaps.
       .fold(|| search_identity_elem(query_set_size),
             |mut nns: Vec<BinaryHeap<SearchResult>>, i: usize| {
               search_inject(query_set, query_set_size, db, i, k, dist_fn, nns)
             })
       .reduce(|| search_identity_elem(query_set_size),
               |mut v1: Vec<BinaryHeap<SearchResult>>, v2: Vec<BinaryHeap<SearchResult>>| {
-                search_sum(v1,v2)
+                search_sum(k, v1,v2)
               });
 
   nearest_neighbors
@@ -194,17 +199,17 @@ fn main() {
   search_rayon(&query_vecs, query_vecs.num_rows, &base_vecs, base_vecs.num_rows, 1000, texmex::sq_euclidean_faster);
 }
 
-fn main_new() {
-  let mmap_start = Instant::now();
-  let base_vecs = texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_learn.bvecs_array", 128).unwrap();
-  println!("mmaped dataset in {:?}", mmap_start.elapsed());
+// fn main_new() {
+//   let mmap_start = Instant::now();
+//   let base_vecs = texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_learn.bvecs_array", 128).unwrap();
+//   println!("mmaped dataset in {:?}", mmap_start.elapsed());
 
-  let rand_init_graph_start = Instant::now();
-  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let (g, bp) = knn_graph::random_init(base_vecs.num_rows as u32, 5, &mut prng, &base_vecs,
-    texmex::sq_euclidean_faster);
-  println!("Initialized knn_graph in {:?}", rand_init_graph_start.elapsed());
-}
+//   let rand_init_graph_start = Instant::now();
+//   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+//   let (g, bp) = knn_graph::random_init(base_vecs.num_rows as u32, 5, &mut prng, &base_vecs,
+//     texmex::sq_euclidean_faster);
+//   println!("Initialized knn_graph in {:?}", rand_init_graph_start.elapsed());
+// }
 
 // test to make sure I understand how to share a vec of atomics between threads.
 
