@@ -39,7 +39,7 @@ impl<'a, T> Vecs<'_, T> {
         // pass over the data and I don't know why.
         // After we modify our code to do more complex access patterns,
         // benchmark it again. See README.md.
-        MapFlags::MAP_PRIVATE | MapFlags::MAP_POPULATE,
+        MapFlags::MAP_PRIVATE, // | MapFlags::MAP_POPULATE,
         f.into_raw_fd(),
         0,
       )
