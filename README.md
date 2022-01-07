@@ -153,6 +153,66 @@ See commit d15eef7f5d32a0869e80596c1b90018c1864d352 and graph-anns/ to see the R
 	Exit status: 0
 ```
 
+#### Rust version with MAP_POPULATE, f32 distances, using rayon
+
+```
+	Command being timed: "cargo run --release"
+	User time (seconds): 334.86
+	System time (seconds): 11.36
+	Percent of CPU this job got: 1724%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:20.07
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 124980652
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 6332
+	Minor (reclaiming a frame) page faults: 3298738
+	Voluntary context switches: 36411
+	Involuntary context switches: 64312
+	Swaps: 0
+	File system inputs: 14619456
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+```
+
+#### Rust version with NO MAP_POPULATE, f32 distances, using rayon
+
+```
+	Command being timed: "cargo run --release"
+	User time (seconds): 327.52
+	System time (seconds): 64.29
+	Percent of CPU this job got: 2556%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:15.32
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 125117508
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1354
+	Minor (reclaiming a frame) page faults: 2875502
+	Voluntary context switches: 8809
+	Involuntary context switches: 101449
+	Swaps: 0
+	File system inputs: 6957008
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+```
+
+#### Rust version with NO MAP_POPULATE, i32 distances, using rayon
+
 Conclusion: MANY more major and minor page faults. However, would it be faster
 if we are doing multiple passes over the data?
 
