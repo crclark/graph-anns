@@ -213,8 +213,41 @@ See commit d15eef7f5d32a0869e80596c1b90018c1864d352 and graph-anns/ to see the R
 
 #### Rust version with NO MAP_POPULATE, i32 distances, using rayon
 
-Conclusion: MANY more major and minor page faults. However, would it be faster
-if we are doing multiple passes over the data?
+```
+	Command being timed: "numactl --interleave=all ./target/release/graph-anns"
+	User time (seconds): 112.84
+	System time (seconds): 6.81
+	Percent of CPU this job got: 2252%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:05.31
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 125031892
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1965918
+	Voluntary context switches: 3091
+	Involuntary context switches: 15299
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+```
+
+Conclusions:
+
+1. MAP_POPULATE gives MANY more major and minor page faults. However, would it be faster if we are doing multiple passes over the data (which we will be in the future)?
+2. Rayon is almost as fast as the handwritten thread code (I forgot to record it, but I was able to hit 4.8 seconds with i32 distances and numactl --interleave=all). This means a few things:
+    1. The reason we don't get full 3200% CPU utilization is almost certainly because of
+       memory bandwidth limits on the Threadripper, not because some threads are finishing early and then sitting idle (since rayon is work-stealing and would have fixed that). Should have bought the real server CPU!
+    2. We can safely adopt rayon and get more flexible and easy-to-modify parallel code, at the cost of added verbosity for reduce operations.
+    3. We can safely ignore rayon and get a small speedup for a reduce operation, for this toy use case.
+
 
 ## Slightly original idea: search graph
 
