@@ -248,6 +248,9 @@ Conclusions:
     2. We can safely adopt rayon and get more flexible and easy-to-modify parallel code, at the cost of added verbosity for reduce operations.
     3. We can safely ignore rayon and get a small speedup for a reduce operation, for this toy use case.
 
+#### MAP_POPULATE vs no MAP_POPULATE on random, repeated access pattern
+
+Randomly initializing a NN-Descent data structure, with no MAP_POPULATE and one thread, it takes 245 seconds to initialize the first 3 million nodes. With MAP_POPULATE, it takes 198 seconds + 53 seconds to mmap = pretty much exactly the same amount of time. If we were running a server process, though, and we wanted to ensure low latency on the first request we serve, MAP_POPULATE would be useful to ensure that our cache was ready to go before we register ourself with the load balancer.
 
 ## Slightly original idea: search graph
 
@@ -267,7 +270,12 @@ The survey paper complains that the papers in this area tend to follow the same 
 2. Use a k-nn graph, but obtain global connectivity by building a TSP-like permutation of the nodes as an additional set of edges to add to the graph. The local search will proceed by randomly swapping nodes in the permutation to try to minimize the distance between successive nodes.
 3. Other random stuff thrown in, as I think of it. Start the search from random nodes? Random restarts? Starting new requests at the terminal point of recent requests, to handle spikes in similar queries (kind of like a fuzzy form of caching)? Online insertion and deletion? Background index optimization?
 
-This will be implemented in Rust because I've been putting of learning it for too long.
+This will be implemented in Rust because I've been putting off learning it for too long.
+
+### More papers discovered
+
+- [Graph-based Nearest Neighbor Search: From Practice to Theory](https://arxiv.org/abs/1907.00845) has several interesting theorems. Unfortunately, they only apply to uniformly distributed data, but it's still helpful. *Beam search on k-nn graphs* is found to be extremely effective. Beam search allows you to keep your degree low even when d is high.
+- In the same vein, [Approximate k-NN graph construction: a generic online approach](https://arxiv.org/pdf/1804.03032) also shows great performance with beam search on a k-nn-graph. Plus, it's *incremental and generalized to arbitrary metric spaces*.
 
 ## Abandoned attempt 1: hilbert-curve based method
 

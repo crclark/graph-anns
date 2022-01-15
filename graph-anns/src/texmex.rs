@@ -35,11 +35,11 @@ impl<'a, T> Vecs<'_, T> {
         std::ptr::null_mut(),
         filesize,
         ProtFlags::PROT_READ,
-        // TODO: MAP_POPULATE is slower when doing a single
-        // pass over the data and I don't know why.
-        // After we modify our code to do more complex access patterns,
-        // benchmark it again. See README.md.
-        MapFlags::MAP_PRIVATE, // | MapFlags::MAP_POPULATE,
+        // NOTE: because our dataset is close to our max RAM size,
+        // parts of our algorithm try to avoid random access across the
+        // entire thing, so MAP_POPULATE is counter-productive -- it loads
+        // parts of the file that will just get unloaded again.
+        MapFlags::MAP_PRIVATE,
         f.into_raw_fd(),
         0,
       )
