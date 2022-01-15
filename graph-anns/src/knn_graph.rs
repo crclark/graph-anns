@@ -22,19 +22,15 @@ pub struct DenseKNNGraph {
   // Prefer to use indexing to access the neighbors of a vertex.
   // `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
   // with their distances from i.
-  //
-  // TODO: split this into two separate vecs so that we can discard the
-  // distances when we move to the permutation phase.
-  pub edges: Vec<(AtomicU32, AtomicF32)>,
+  pub edges: Vec<AtomicU32>,
+  pub edge_distances: Vec<AtomicF32>,
 }
 
-impl std::ops::Index<u32> for DenseKNNGraph {
-  type Output = [(AtomicU32, AtomicF32)];
-
-  fn index(&self, index: u32) -> &[(AtomicU32, AtomicF32)] {
+impl DenseKNNGraph {
+  fn get_edges(&self, index: u32) -> (&[AtomicU32], &[AtomicF32]) {
     let i = index * self.out_degree;
     let j = i + self.out_degree;
-    &self.edges[i as usize..j as usize]
+    (&self.edges[i as usize..j as usize], &self.edge_distances[i as usize..j as usize])
   }
 }
 
@@ -58,21 +54,111 @@ fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   dist_fn(&db[i as usize], &db[j as usize])
 }
 
+/// Computes a sliding window of num_vertices/num_partitions vertices around i.
+/// Examples:
+///
+/// ```
+/// assert_eq!(chunk_range(10, 2, 0), (0,5));
+/// ```
+pub fn chunk_range(num_vertices: u32, num_partitions: usize, i: u32) -> (u32, u32) {
+  let w = num_vertices/(num_partitions as u32);
+  let r = w/2;
+  let rem = w % 2;
+
+  if i < r
+  {
+    (0, w)
+  }
+  else if i > num_vertices - r
+  {
+    (num_vertices - w, num_vertices)
+  }
+  else if i > r + rem {
+    (i - r - rem, i + r)
+  }
+  else {
+    (i - r, i + r + rem)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_range() {
+      assert_eq!(chunk_range(10, 2, 0), (0,5));
+      assert_eq!(chunk_range(10, 2, 1), (0,5));
+      assert_eq!(chunk_range(10, 2, 2), (0,5));
+      assert_eq!(chunk_range(10, 2, 3), (1,6));
+      assert_eq!(chunk_range(10, 2, 4), (1,6));
+      assert_eq!(chunk_range(10, 2, 5), (2,7));
+      assert_eq!(chunk_range(10, 2, 6), (3,8));
+      assert_eq!(chunk_range(10, 2, 7), (4,9));
+      assert_eq!(chunk_range(10, 2, 8), (5,10));
+      assert_eq!(chunk_range(10, 2, 9), (5,10));
+
+      assert_eq!(chunk_range(11, 2, 0), (0,5));
+      assert_eq!(chunk_range(11, 2, 1), (0,5));
+      assert_eq!(chunk_range(11, 2, 2), (0,5));
+      assert_eq!(chunk_range(11, 2, 3), (1,6));
+      assert_eq!(chunk_range(11, 2, 4), (1,6));
+      assert_eq!(chunk_range(11, 2, 5), (2,7));
+      assert_eq!(chunk_range(11, 2, 6), (3,8));
+      assert_eq!(chunk_range(11, 2, 7), (4,9));
+      assert_eq!(chunk_range(11, 2, 8), (5,10));
+      assert_eq!(chunk_range(11, 2, 9), (6,11));
+
+      assert_eq!(chunk_range(10, 3, 0), (0,3));
+      assert_eq!(chunk_range(10, 3, 1), (0,3));
+      assert_eq!(chunk_range(10, 3, 2), (1,4));
+      assert_eq!(chunk_range(10, 3, 3), (1,4));
+      assert_eq!(chunk_range(10, 3, 4), (2,5));
+      assert_eq!(chunk_range(10, 3, 5), (3,6));
+      assert_eq!(chunk_range(10, 3, 6), (4,7));
+      assert_eq!(chunk_range(10, 3, 7), (5,8));
+      assert_eq!(chunk_range(10, 3, 8), (6,9));
+      assert_eq!(chunk_range(10, 3, 9), (7,10));
+
+      assert_eq!(chunk_range(10, 1, 0), (0,10));
+      assert_eq!(chunk_range(10, 1, 1), (0,10));
+      assert_eq!(chunk_range(10, 1, 2), (0,10));
+      assert_eq!(chunk_range(10, 1, 3), (0,10));
+      assert_eq!(chunk_range(10, 1, 4), (0,10));
+      assert_eq!(chunk_range(10, 1, 5), (0,10));
+      assert_eq!(chunk_range(10, 1, 6), (0,10));
+      assert_eq!(chunk_range(10, 1, 7), (0,10));
+      assert_eq!(chunk_range(10, 1, 8), (0,10));
+      assert_eq!(chunk_range(10, 1, 9), (0,10));
+
+    }
+}
+
 // TODO: not pub
+/// Randomly initializes a K-NN Graph. This graph can then be optimized with
+/// nn-descent.
 pub fn random_init<R : RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   num_vertices: u32,
   out_degree: u32,
   prng: &mut R,
   db: &C,
-  dist_fn: fn(&T, &T) -> f32) -> (DenseKNNGraph, DenseKNNGraphBackpointers) {
+  dist_fn: fn(&T, &T) -> f32,
+  // An optimization for large datasets to speed up initialization, probably at
+  // the expense of slower convergence. The dataset is split into num_partitions
+  // chunks, and nodes in each chunk will only be connected to other nodes in
+  // the same chunk. This improves cache locality -- only 1/num_partitions of
+  // the dataset will need to be in active use at any time during initialization.
+  num_partitions: usize) -> (DenseKNNGraph, DenseKNNGraphBackpointers)
+   {
   if num_vertices == u32::max_value() {
     panic!("Max number of vertices is u32::max_value() - 1")
   }
 
   let start = Instant::now();
   let mut edges = Vec::with_capacity(num_vertices as usize * out_degree as usize);
+  let mut edge_distances = Vec::with_capacity(num_vertices as usize * out_degree as usize);
 
-  let mut g = DenseKNNGraph{num_vertices, out_degree, edges};
+  let mut g = DenseKNNGraph{num_vertices, out_degree, edges, edge_distances};
 
   let mut backpointers = Vec::with_capacity(num_vertices as usize);
 
@@ -81,29 +167,20 @@ pub fn random_init<R : RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>
   }
   let mut bp = DenseKNNGraphBackpointers{backpointers};
 
-  let rand_vertex = Uniform::from(0..num_vertices);
 
   println!("Allocated vecs and created mutexes in {:?}", start.elapsed());
 
-  // TODO: this becomes slow with the 120GiB dataset because we don't have
-  // enough memory to cache the whole thing. We end up taking about 70 seconds
-  // per million nodes initialized vs 3 seconds per million with the 12GiB file.
-  // IDEA: dramatically improve cache hits by limiting rand_vertex distribution
-  // to return nodes from a limited contiguous range of the dataset. Say we
-  // split it into 3 chunks.
-  // Then we have divs = [333_000_000, 666_000_000, 1_000_000_000]. Find the
-  // div of node u by iterating through divs and finding first index where u <
-  // divs[index]. Then use dists[index] to select its random neighbors.
-  // This would allow us to have all cache hits, without greatly compromising
-  // the randomness of the initial state.
-  // Parallelizing this would also enable us to saturate the NVMe disk better.
   let start_loop = Instant::now();
   for u in 0..num_vertices {
+
+    let (ix_range_low, ix_range_high) = chunk_range(num_vertices, num_partitions, u);
+    let rand_vertex = Uniform::from(ix_range_low..ix_range_high);
 
     for nbr_ix in 0..out_degree {
       let v = rand_vertex.sample(prng);
       let distance = get_dist(u, v, db, dist_fn);
-      g.edges.push((AtomicU32::new(v), AtomicF32::new(distance)));
+      g.edges.push((AtomicU32::new(v)));
+      g.edge_distances.push(AtomicF32::new(distance));
       let mut s = bp.backpointers[v as usize].lock();
       s.insert(u);
     }
