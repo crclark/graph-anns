@@ -1,55 +1,271 @@
 use atomic_float::AtomicF32;
+use nohash_hasher::IntMap;
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicU32;
-use tinyset::{Set64, SetU32};
-use rand::{RngCore};
 use rand::distributions::{Distribution, Uniform};
+use rand::RngCore;
+use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256StarStar;
+use std::cmp::Reverse;
+use std::collections::binary_heap::BinaryHeap;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
+use tinyset::SetU32;
+use Ordering;
 
-// A directed graph stored contiguously in memory as an adjacency list.
-// All vertices are guaranteed to have the same out-degree.
-// Nodes are u32s numbered from 0 to n-1. Each element of each node's adjacency
-// list is an AtomicU32, to enable the implementation of parallelized
-// heuristic algorithms.
+// TODO: if a single-threaded graph construction algorithm is sufficient for
+// good performance, remove all the atomics and mutexes? But if we want to
+// support concurrent insert and query, we would still need them.
+/// A directed graph stored contiguously in memory as an adjacency list.
+/// All vertices are guaranteed to have the same out-degree.
+/// Nodes are u32s numbered from 0 to n-1. Each element of each node's adjacency
+/// list is an AtomicU32, to enable the implementation of parallelized
+/// heuristic algorithms.
 pub struct DenseKNNGraph {
-  // n, the number of vertices in the graph. The valid indices of the graph
-  // are 0 to n-1.
+  /// n, the number of vertices in the graph. The valid indices of the graph
+  /// are 0 to n-1.
   pub num_vertices: u32,
-  // The number of neighbors of each vertex. This is a constant.
+  /// The number of neighbors of each vertex. This is a constant.
   pub out_degree: u32,
-  // The underlying buffer of n*num_vertices AtomicU32s. Use with caution.
-  // Prefer to use indexing to access the neighbors of a vertex.
-  // `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
-  // with their distances from i.
+  /// The underlying buffer of n*num_vertices AtomicU32s. Use with caution.
+  /// Prefer to use indexing to access the neighbors of a vertex.
+  /// `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
+  /// with their distances from i.
   pub edges: Vec<AtomicU32>,
   pub edge_distances: Vec<AtomicF32>,
-}
-
-impl DenseKNNGraph {
-  fn get_edges(&self, index: u32) -> (&[AtomicU32], &[AtomicF32]) {
-    let i = index * self.out_degree;
-    let j = i + self.out_degree;
-    (&self.edges[i as usize..j as usize], &self.edge_distances[i as usize..j as usize])
-  }
-}
-
-// Maintains an association between vertices and the vertices that link out to
-// them. In other words, each backpointers[i] is the set of vertices S s.t.
-// for all x in S, a directed edge exists pointing from x to i.
-//
-// This is an internal detail of NN-descent and
-// doesn't need to be returned to the caller.
-pub struct DenseKNNGraphBackpointers {
+  /// Maintains an association between vertices and the vertices that link out to
+  /// them. In other words, each backpointers[i] is the set of vertices S s.t.
+  /// for all x in S, a directed edge exists pointing from x to i.
   pub backpointers: Vec<Mutex<SetU32>>,
 }
 
+impl DenseKNNGraph {
+  /// Allocates a graph of the specified size and out_degree, but
+  /// doesn't populate the edges.
+  fn empty(num_vertices: u32, out_degree: u32) -> DenseKNNGraph {
+    let mut edges = Vec::with_capacity(num_vertices as usize * out_degree as usize);
+    let mut edge_distances = Vec::with_capacity(num_vertices as usize * out_degree as usize);
+
+    let mut backpointers = Vec::with_capacity(num_vertices as usize);
+
+    for u in 0..num_vertices {
+      backpointers.push(Mutex::new(SetU32::new()));
+    }
+    DenseKNNGraph {
+      num_vertices,
+      out_degree,
+      edges,
+      edge_distances,
+      backpointers,
+    }
+  }
+
+  pub fn get_edges(&self, index: u32) -> (&[AtomicU32], &[AtomicF32]) {
+    let i = index * self.out_degree;
+    let j = i + self.out_degree;
+    (
+      &self.edges[i as usize..j as usize],
+      &self.edge_distances[i as usize..j as usize],
+    )
+  }
+
+  /// Returns an inconsistent snapshot of the neighbors of index.
+  /// Use for testing, debugging, and in heuristic algorithms where
+  /// consistency is less important.
+  fn get_edges_inconsistent(&self, index: u32) -> Vec<u32> {
+    let (edges, _) = self.get_edges(index);
+    let mut ret = Vec::new();
+    for e in edges {
+      ret.push(e.load(Relaxed));
+    }
+    ret
+  }
+
+  /// Panics if graph is internally inconsistent.
+  fn consistency_check(&self) {
+    if self.edges.len() != self.edge_distances.len() {
+      panic!("edges and edge_distances are inconsistent lengths");
+    }
+
+    if self.edges.len() != self.num_vertices as usize * self.out_degree as usize {
+      panic!(
+        "edges.len() is not equal to num_vertices * out_degree. edge.len() is {}",
+        self.edges.len()
+      );
+    }
+
+    for i in 0..self.num_vertices {
+      let (nbrs, _) = self.get_edges(i);
+      for nbr in nbrs.iter() {
+        let nbr_loaded = nbr.load(Relaxed);
+        if nbr_loaded == i {
+          panic!("Self loop at node {}", i);
+        }
+        let nbr_backptrs = self.backpointers[nbr_loaded as usize].lock();
+        if !nbr_backptrs.contains(i) {
+          panic!("backpointer missing for vertex {} on nbr {}", i, nbr_loaded);
+        }
+      }
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SearchResult {
+  pub vec_index: u32,
+  pub dist: f32,
+}
+
+impl SearchResult {
+  pub fn new(vec_index: u32, dist: f32) -> SearchResult {
+    Self { vec_index, dist }
+  }
+}
+
+impl PartialEq for SearchResult {
+  fn eq(&self, other: &Self) -> bool {
+    self.vec_index == other.vec_index
+  }
+}
+
+impl Eq for SearchResult {}
+
+impl PartialOrd for SearchResult {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    self.dist.partial_cmp(&other.dist)
+  }
+}
+
+impl Ord for SearchResult {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.dist.total_cmp(&other.dist)
+  }
+}
+
+/// Perform beam search for the k nearest neighbors of a point q. Returns
+/// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
+/// This is a translation of the pseudocode from
+/// Approximate k-NN Graph Construction: A Generic Online Approach
+fn knn_beam_search<R: RngCore>(
+  g: DenseKNNGraph,
+  dist_to_q: impl Fn(u32) -> f32,
+  num_searchers: usize,
+  k: usize,
+  prng: &mut R,
+) -> (BinaryHeap<SearchResult>, SetU32, IntMap<u32, f32>) {
+  let mut q_max_heap: BinaryHeap<SearchResult> = BinaryHeap::new();
+  let mut r_min_heap: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
+  let mut visited = SetU32::new();
+  let mut visited_distances: IntMap<u32, f32> = IntMap::default();
+
+  let rand_vertex = Uniform::from(0..g.num_vertices);
+
+  // lines 2 to 10 of the pseudocode
+  for i in 0..num_searchers {
+    let r = rand_vertex.sample(prng);
+    let r_dist = dist_to_q(r);
+    r_min_heap.push(Reverse(SearchResult::new(r, r_dist)));
+    match q_max_heap.peek() {
+      None => {
+        q_max_heap.push(SearchResult::new(r, r_dist));
+        // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
+        // We are skipping it here since we did it above.
+      }
+      Some(f) => {
+        let f_dist = dist_to_q(f.vec_index);
+        if r_dist < f_dist || q_max_heap.len() < k {
+          q_max_heap.push(SearchResult::new(r, r_dist));
+        }
+      }
+    }
+  }
+
+  // lines 11 to 27 of the pseudocode
+  while r_min_heap.len() > 0 {
+    while q_max_heap.len() > k {
+      q_max_heap.pop();
+    }
+
+    let Reverse(r) = r_min_heap.pop().unwrap();
+    let &f = { q_max_heap.peek().unwrap() };
+    if r.dist > f.dist {
+      break;
+    }
+
+    let (r_out, _) = g.get_edges(r.vec_index);
+    // TODO: since this algo actually needs the backpointers, add them to
+    // the graph struct.
+    let mut r_nbrs = {
+      let r = g.backpointers[r.vec_index as usize].lock();
+      r.clone()
+    };
+    for nbr in r_out.iter() {
+      r_nbrs.insert(nbr.load(Relaxed));
+    }
+
+    for e in r_nbrs.iter() {
+      if !visited.contains(e) {
+        visited.insert(e);
+        let e_dist = dist_to_q(e);
+        let f_dist = dist_to_q(f.vec_index);
+        visited_distances.insert(e, e_dist);
+        if e_dist < f_dist || q_max_heap.len() < k {
+          q_max_heap.push(SearchResult::new(e, e_dist));
+          r_min_heap.push(Reverse(SearchResult::new(e, e_dist)));
+        }
+      }
+    }
+  }
+
+  (q_max_heap, visited, visited_distances)
+}
+
+/// Constructs an exact k-nn graph on the first n items in db. O(n^2).
+fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
+  n: u32,
+  k: u32,
+  db: &C,
+  dist_fn: fn(&T, &T) -> f32,
+) -> DenseKNNGraph {
+  if (k >= n) {
+    panic!("k must be less than n");
+  }
+
+  let mut g = DenseKNNGraph::empty(n, k);
+
+  for i in 0..n {
+    let mut knn = BinaryHeap::new();
+    for j in 0..n {
+      if i == j {
+        continue;
+      }
+      let dist = get_dist(i, j, db, dist_fn);
+      knn.push(SearchResult::new(j, dist));
+
+      while knn.len() > k as usize {
+        knn.pop();
+      }
+    }
+    while knn.len() > 0 {
+      let SearchResult { vec_index, dist } = knn.pop().unwrap();
+      g.edges.push(AtomicU32::new(vec_index));
+      g.edge_distances.push(AtomicF32::new(dist));
+      let mut s = g.backpointers[vec_index as usize].lock();
+      s.insert(i);
+    }
+  }
+
+  g
+}
+
 // TODO: wrap db and dist_fn in a struct and make this a method on it.
+// TODO: avoid passing db at all? We need to support incremental data.
 fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   i: u32,
   j: u32,
   db: &C,
-  dist_fn: fn(&T, &T) -> f32
+  dist_fn: fn(&T, &T) -> f32,
 ) -> f32 {
   dist_fn(&db[i as usize], &db[j as usize])
 }
@@ -61,83 +277,25 @@ fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
 /// assert_eq!(chunk_range(10, 2, 0), (0,5));
 /// ```
 pub fn chunk_range(num_vertices: u32, num_partitions: usize, i: u32) -> (u32, u32) {
-  let w = num_vertices/(num_partitions as u32);
-  let r = w/2;
+  let w = num_vertices / (num_partitions as u32);
+  let r = w / 2;
   let rem = w % 2;
 
-  if i < r
-  {
+  if i < r {
     (0, w)
-  }
-  else if i > num_vertices - r
-  {
+  } else if i > num_vertices - r {
     (num_vertices - w, num_vertices)
-  }
-  else if i > r + rem {
+  } else if i > r + rem {
     (i - r - rem, i + r)
-  }
-  else {
+  } else {
     (i - r, i + r + rem)
   }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_chunk_range() {
-      assert_eq!(chunk_range(10, 2, 0), (0,5));
-      assert_eq!(chunk_range(10, 2, 1), (0,5));
-      assert_eq!(chunk_range(10, 2, 2), (0,5));
-      assert_eq!(chunk_range(10, 2, 3), (1,6));
-      assert_eq!(chunk_range(10, 2, 4), (1,6));
-      assert_eq!(chunk_range(10, 2, 5), (2,7));
-      assert_eq!(chunk_range(10, 2, 6), (3,8));
-      assert_eq!(chunk_range(10, 2, 7), (4,9));
-      assert_eq!(chunk_range(10, 2, 8), (5,10));
-      assert_eq!(chunk_range(10, 2, 9), (5,10));
-
-      assert_eq!(chunk_range(11, 2, 0), (0,5));
-      assert_eq!(chunk_range(11, 2, 1), (0,5));
-      assert_eq!(chunk_range(11, 2, 2), (0,5));
-      assert_eq!(chunk_range(11, 2, 3), (1,6));
-      assert_eq!(chunk_range(11, 2, 4), (1,6));
-      assert_eq!(chunk_range(11, 2, 5), (2,7));
-      assert_eq!(chunk_range(11, 2, 6), (3,8));
-      assert_eq!(chunk_range(11, 2, 7), (4,9));
-      assert_eq!(chunk_range(11, 2, 8), (5,10));
-      assert_eq!(chunk_range(11, 2, 9), (6,11));
-
-      assert_eq!(chunk_range(10, 3, 0), (0,3));
-      assert_eq!(chunk_range(10, 3, 1), (0,3));
-      assert_eq!(chunk_range(10, 3, 2), (1,4));
-      assert_eq!(chunk_range(10, 3, 3), (1,4));
-      assert_eq!(chunk_range(10, 3, 4), (2,5));
-      assert_eq!(chunk_range(10, 3, 5), (3,6));
-      assert_eq!(chunk_range(10, 3, 6), (4,7));
-      assert_eq!(chunk_range(10, 3, 7), (5,8));
-      assert_eq!(chunk_range(10, 3, 8), (6,9));
-      assert_eq!(chunk_range(10, 3, 9), (7,10));
-
-      assert_eq!(chunk_range(10, 1, 0), (0,10));
-      assert_eq!(chunk_range(10, 1, 1), (0,10));
-      assert_eq!(chunk_range(10, 1, 2), (0,10));
-      assert_eq!(chunk_range(10, 1, 3), (0,10));
-      assert_eq!(chunk_range(10, 1, 4), (0,10));
-      assert_eq!(chunk_range(10, 1, 5), (0,10));
-      assert_eq!(chunk_range(10, 1, 6), (0,10));
-      assert_eq!(chunk_range(10, 1, 7), (0,10));
-      assert_eq!(chunk_range(10, 1, 8), (0,10));
-      assert_eq!(chunk_range(10, 1, 9), (0,10));
-
-    }
 }
 
 // TODO: not pub
 /// Randomly initializes a K-NN Graph. This graph can then be optimized with
 /// nn-descent.
-pub fn random_init<R : RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
+pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   num_vertices: u32,
   out_degree: u32,
   prng: &mut R,
@@ -148,49 +306,40 @@ pub fn random_init<R : RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>
   // chunks, and nodes in each chunk will only be connected to other nodes in
   // the same chunk. This improves cache locality -- only 1/num_partitions of
   // the dataset will need to be in active use at any time during initialization.
-  num_partitions: usize) -> (DenseKNNGraph, DenseKNNGraphBackpointers)
-   {
+  num_partitions: usize,
+) -> DenseKNNGraph {
   if num_vertices == u32::max_value() {
     panic!("Max number of vertices is u32::max_value() - 1")
   }
 
   let start = Instant::now();
-  let mut edges = Vec::with_capacity(num_vertices as usize * out_degree as usize);
-  let mut edge_distances = Vec::with_capacity(num_vertices as usize * out_degree as usize);
 
-  let mut g = DenseKNNGraph{num_vertices, out_degree, edges, edge_distances};
+  let mut g = DenseKNNGraph::empty(num_vertices, out_degree);
 
-  let mut backpointers = Vec::with_capacity(num_vertices as usize);
-
-  for u in 0..num_vertices {
-    backpointers.push(Mutex::new(SetU32::new()));
-  }
-  let mut bp = DenseKNNGraphBackpointers{backpointers};
-
-
-  println!("Allocated vecs and created mutexes in {:?}", start.elapsed());
+  println!(
+    "Allocated vecs and created mutexes in {:?}",
+    start.elapsed()
+  );
 
   let start_loop = Instant::now();
   for u in 0..num_vertices {
-
     let (ix_range_low, ix_range_high) = chunk_range(num_vertices, num_partitions, u);
     let rand_vertex = Uniform::from(ix_range_low..ix_range_high);
 
     for nbr_ix in 0..out_degree {
       let v = rand_vertex.sample(prng);
       let distance = get_dist(u, v, db, dist_fn);
-      g.edges.push((AtomicU32::new(v)));
+      g.edges.push(AtomicU32::new(v));
       g.edge_distances.push(AtomicF32::new(distance));
-      let mut s = bp.backpointers[v as usize].lock();
+      let mut s = g.backpointers[v as usize].lock();
       s.insert(u);
     }
 
     if u % 1000_000 == 0 {
       println!("finished u = {:?}, elapsed = {:?}", u, start_loop.elapsed());
     }
-
   }
-  (g, bp)
+  g
 }
 
 // TODO: consider doing this when we want to overlay the permutation-based graph
@@ -207,7 +356,7 @@ pub fn random_init<R : RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>
 // Performs the NN-descent algorithm on a subset of the vertices of the graph.
 // Early stopping occurs when the number of successful updates in an iteration
 // is less than `delta*k*(j-i)`.
-fn nn_descent_thread<R : RngCore>(
+fn nn_descent_thread<R: RngCore>(
   // Lower bound (inclusive) node that this thread is responsible for
   i: u32,
   // Upper bound (exclusive) node that this thread is responsible for
@@ -215,8 +364,8 @@ fn nn_descent_thread<R : RngCore>(
   // Early stopping parameter. Suggested default from the paper: 0.001.
   delta: f64,
   g: Arc<DenseKNNGraph>,
-  bp: Arc<DenseKNNGraphBackpointers>,
-  prng: R) -> () {
+  prng: R,
+) -> () {
   unimplemented!()
 }
 
@@ -265,7 +414,93 @@ pub fn nn_descent_parallel<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>
   db: &C,
   // TODO: parametrize the type of the distances so we can use much faster
   // i32 if possible.
-  dist_fn: fn(&T, &T) -> f32
+  dist_fn: fn(&T, &T) -> f32,
 ) -> DenseKNNGraph {
   unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use texmex::sq_euclidean_faster;
+
+  #[test]
+  fn test_chunk_range() {
+    assert_eq!(chunk_range(10, 2, 0), (0, 5));
+    assert_eq!(chunk_range(10, 2, 1), (0, 5));
+    assert_eq!(chunk_range(10, 2, 2), (0, 5));
+    assert_eq!(chunk_range(10, 2, 3), (1, 6));
+    assert_eq!(chunk_range(10, 2, 4), (1, 6));
+    assert_eq!(chunk_range(10, 2, 5), (2, 7));
+    assert_eq!(chunk_range(10, 2, 6), (3, 8));
+    assert_eq!(chunk_range(10, 2, 7), (4, 9));
+    assert_eq!(chunk_range(10, 2, 8), (5, 10));
+    assert_eq!(chunk_range(10, 2, 9), (5, 10));
+
+    assert_eq!(chunk_range(11, 2, 0), (0, 5));
+    assert_eq!(chunk_range(11, 2, 1), (0, 5));
+    assert_eq!(chunk_range(11, 2, 2), (0, 5));
+    assert_eq!(chunk_range(11, 2, 3), (1, 6));
+    assert_eq!(chunk_range(11, 2, 4), (1, 6));
+    assert_eq!(chunk_range(11, 2, 5), (2, 7));
+    assert_eq!(chunk_range(11, 2, 6), (3, 8));
+    assert_eq!(chunk_range(11, 2, 7), (4, 9));
+    assert_eq!(chunk_range(11, 2, 8), (5, 10));
+    assert_eq!(chunk_range(11, 2, 9), (6, 11));
+
+    assert_eq!(chunk_range(10, 3, 0), (0, 3));
+    assert_eq!(chunk_range(10, 3, 1), (0, 3));
+    assert_eq!(chunk_range(10, 3, 2), (1, 4));
+    assert_eq!(chunk_range(10, 3, 3), (1, 4));
+    assert_eq!(chunk_range(10, 3, 4), (2, 5));
+    assert_eq!(chunk_range(10, 3, 5), (3, 6));
+    assert_eq!(chunk_range(10, 3, 6), (4, 7));
+    assert_eq!(chunk_range(10, 3, 7), (5, 8));
+    assert_eq!(chunk_range(10, 3, 8), (6, 9));
+    assert_eq!(chunk_range(10, 3, 9), (7, 10));
+
+    assert_eq!(chunk_range(10, 1, 0), (0, 10));
+    assert_eq!(chunk_range(10, 1, 1), (0, 10));
+    assert_eq!(chunk_range(10, 1, 2), (0, 10));
+    assert_eq!(chunk_range(10, 1, 3), (0, 10));
+    assert_eq!(chunk_range(10, 1, 4), (0, 10));
+    assert_eq!(chunk_range(10, 1, 5), (0, 10));
+    assert_eq!(chunk_range(10, 1, 6), (0, 10));
+    assert_eq!(chunk_range(10, 1, 7), (0, 10));
+    assert_eq!(chunk_range(10, 1, 8), (0, 10));
+    assert_eq!(chunk_range(10, 1, 9), (0, 10));
+  }
+
+  #[test]
+  fn test_exhaustive_knn_graph() {
+    let db = vec![[1], [2], [3], [10], [11], [12]];
+    let g = exhaustive_knn_graph(6, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    g.consistency_check();
+    assert_eq!(g.get_edges_inconsistent(0), vec![2, 1]);
+    assert_eq!(g.get_edges_inconsistent(1), vec![2, 0]);
+    assert_eq!(g.get_edges_inconsistent(2), vec![0, 1]);
+    assert_eq!(g.get_edges_inconsistent(3), vec![5, 4]);
+    assert_eq!(g.get_edges_inconsistent(4), vec![3, 5]);
+    assert_eq!(g.get_edges_inconsistent(5), vec![3, 4]);
+  }
+
+  #[test]
+  fn test_beam_search_fully_connected_graph() {
+    let db = vec![[1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
+    let g = exhaustive_knn_graph(6, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    g.consistency_check();
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    let q = [1.2f32];
+    let (nearest, _, _) = knn_beam_search(
+      g,
+      |i| sq_euclidean_faster(&db[i as usize], &q),
+      1,
+      2,
+      &mut prng,
+    );
+    assert_eq!(
+      nearest.iter().map(|x| x.vec_index).collect::<Vec<u32>>(),
+      vec![1u32, 0]
+    );
+  }
 }
