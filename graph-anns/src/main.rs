@@ -1,20 +1,21 @@
 #![feature(total_cmp)]
 extern crate atomic_float;
 extern crate nix;
+extern crate nohash_hasher;
 extern crate parking_lot;
-extern crate tinyset;
 extern crate rand;
 extern crate rand_core;
 extern crate rand_xoshiro;
 extern crate rayon;
+extern crate tinyset;
 
+use rand_core::SeedableRng;
+use rand_xoshiro::Xoshiro256StarStar;
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
 use std::thread;
 use std::time::Instant;
-use rand_xoshiro::Xoshiro256StarStar;
-use rand_core::SeedableRng;
-use rayon::prelude::*;
 
 mod knn_graph;
 mod texmex;
@@ -87,8 +88,12 @@ fn _search_identity_elem(query_set_size: usize) -> Vec<BinaryHeap<SearchResult>>
   nearest_neighbors
 }
 
-fn _search_sum(k: usize, mut v1: Vec<BinaryHeap<SearchResult>>, mut v2: Vec<BinaryHeap<SearchResult>>) -> Vec<BinaryHeap<SearchResult>> {
-  for (x,y) in v1.iter_mut().zip(v2.iter_mut()) {
+fn _search_sum(
+  k: usize,
+  mut v1: Vec<BinaryHeap<SearchResult>>,
+  mut v2: Vec<BinaryHeap<SearchResult>>,
+) -> Vec<BinaryHeap<SearchResult>> {
+  for (x, y) in v1.iter_mut().zip(v2.iter_mut()) {
     x.append(y);
     while x.len() > k {
       x.pop().unwrap();
@@ -104,9 +109,8 @@ fn _search_inject<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   i: usize,
   k: usize,
   dist_fn: fn(&T, &T) -> f32,
-  mut nearest_neighbors: Vec<BinaryHeap<SearchResult>>
+  mut nearest_neighbors: Vec<BinaryHeap<SearchResult>>,
 ) -> Vec<BinaryHeap<SearchResult>> {
-
   for q in 0..query_set_size {
     let dist = dist_fn(&db[i], &query_set[q]);
     let heap: &mut BinaryHeap<SearchResult> = nearest_neighbors.get_mut(q).unwrap();
@@ -116,7 +120,7 @@ fn _search_inject<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
     }
   }
   nearest_neighbors
-  }
+}
 
 fn _search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
   query_set: &C,
@@ -128,19 +132,20 @@ fn _search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
   // i32 if possible.
   dist_fn: fn(&T, &T) -> f32,
 ) -> Vec<BinaryHeap<SearchResult>> {
-  let nearest_neighbors =
-      (0..db_size)
-      .into_par_iter()
-      // NOTE: fold + reduce ensures that we don't get swamped with the overhead
-      // of allocating one billion BinaryHeaps.
-      .fold(|| _search_identity_elem(query_set_size),
-            |mut nns: Vec<BinaryHeap<SearchResult>>, i: usize| {
-              _search_inject(query_set, query_set_size, db, i, k, dist_fn, nns)
-            })
-      .reduce(|| _search_identity_elem(query_set_size),
-              |mut v1: Vec<BinaryHeap<SearchResult>>, v2: Vec<BinaryHeap<SearchResult>>| {
-                _search_sum(k, v1,v2)
-              });
+  let nearest_neighbors = (0..db_size)
+    .into_par_iter()
+    // NOTE: fold + reduce ensures that we don't get swamped with the overhead
+    // of allocating one billion BinaryHeaps.
+    .fold(
+      || _search_identity_elem(query_set_size),
+      |nns: Vec<BinaryHeap<SearchResult>>, i: usize| {
+        _search_inject(query_set, query_set_size, db, i, k, dist_fn, nns)
+      },
+    )
+    .reduce(
+      || _search_identity_elem(query_set_size),
+      |v1: Vec<BinaryHeap<SearchResult>>, v2: Vec<BinaryHeap<SearchResult>>| _search_sum(k, v1, v2),
+    );
 
   nearest_neighbors
 }
@@ -196,7 +201,14 @@ fn _main_rayon() {
     texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_query.bvecs_array_one_point", 128).unwrap();
   println!("Loaded dataset in {:?}", start.elapsed());
 
-  _search_rayon(&query_vecs, query_vecs.num_rows, &base_vecs, base_vecs.num_rows, 1000, texmex::sq_euclidean_faster);
+  _search_rayon(
+    &query_vecs,
+    query_vecs.num_rows,
+    &base_vecs,
+    base_vecs.num_rows,
+    1000,
+    texmex::sq_euclidean_faster,
+  );
 }
 
 fn main() {
@@ -206,9 +218,18 @@ fn main() {
 
   let rand_init_graph_start = Instant::now();
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let (g, bp) = knn_graph::random_init(base_vecs.num_rows as u32, 5, &mut prng, &base_vecs,
-    texmex::sq_euclidean_faster, 2);
-  println!("Initialized knn_graph in {:?}", rand_init_graph_start.elapsed());
+  let g = knn_graph::random_init(
+    base_vecs.num_rows as u32,
+    5,
+    &mut prng,
+    &base_vecs,
+    texmex::sq_euclidean_faster,
+    2,
+  );
+  println!(
+    "Initialized knn_graph in {:?}",
+    rand_init_graph_start.elapsed()
+  );
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.
