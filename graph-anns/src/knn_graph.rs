@@ -10,11 +10,7 @@ use std::time::Instant;
 use tinyset::SetU32;
 use Ordering;
 
-// TODO: if a single-threaded graph construction algorithm is sufficient for
-// good performance, remove all the atomics and mutexes? But if we want to
-// support concurrent insert and query, we would still need them.
-// --
-// New wrinkle: we need to be able to insert nodes. That means we need to be
+// NOTE: we need to be able to insert nodes. That means we need to be
 // able to (virtually or actually) resize the vector of edges, AND keep track of
 // the number of vertices in the graph in total. That requires coordinated
 // updates to multiple fields in the struct, which means we might as well remove
@@ -70,13 +66,68 @@ impl DenseKNNGraph {
     }
   }
 
+  /// Get the neighbors of u and their distances. Panics if index
+  /// >= num_vertices.
   pub fn get_edges(&self, index: u32) -> (&[u32], &[f32]) {
+    assert!(index < self.num_vertices);
+
     let i = index * self.out_degree;
     let j = i + self.out_degree;
     (
       &self.edges[i as usize..j as usize],
       &self.edge_distances[i as usize..j as usize],
     )
+  }
+
+  /// Get the neighbors of u and their distances. Panics if index >= num_vertices.
+  fn get_edges_mut(&mut self, index: u32) -> (&mut [u32], &mut [f32]) {
+    assert!(index < self.num_vertices);
+
+    let i = index * self.out_degree;
+    let j = i + self.out_degree;
+    (
+      &mut self.edges[i as usize..j as usize],
+      &mut self.edge_distances[i as usize..j as usize],
+    )
+  }
+
+  /// Creates an edge from `from` to `to` if the distance `dist` between them is
+  /// less than the distance from `from` to one of its existing neighbors `u`.
+  /// If so, removes the edge (`from`, `u`).
+  ///
+  /// `to` must have already been added to the graph by insert_vertex etc.
+  ///
+  /// Returns `true` if the new edge was added.
+  fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
+    let (mut nbrs, mut dists) = self.get_edges_mut(from);
+
+    for (nbr, nbr_dist) in nbrs.iter_mut().zip(dists) {
+      if dist < *nbr_dist {
+        *nbr = to;
+        *nbr_dist = dist;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Insert a new vertex into the graph, given its k neighbors and their
+  /// distances. Panics if num_vertices == capacity.
+  fn insert_vertex(&mut self, u: u32, nbrs: Vec<u32>, dists: Vec<f32>) {
+    assert!(self.num_vertices < self.capacity);
+
+    let od = self.out_degree as usize;
+    assert!(nbrs.len() == od && dists.len() == od);
+
+    for (nbr, dist) in nbrs.iter().zip(dists) {
+      self.edges.push(*nbr);
+      self.edge_distances.push(dist);
+      let s = &mut self.backpointers[*nbr as usize];
+      s.insert(u);
+    }
+
+    self.num_vertices += 1;
   }
 
   /// Panics if graph is internally inconsistent.
@@ -500,5 +551,50 @@ mod tests {
       nearest.iter().map(|x| x.vec_index).collect::<Vec<u32>>(),
       vec![1u32, 0]
     );
+  }
+
+  #[test]
+  fn test_insert_vertex() {
+    let mut g = DenseKNNGraph::empty(3, 2);
+    g.insert_vertex(0, vec![2,1], vec![2.0, 1.0]);
+    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
+    g.insert_vertex(2, vec![0,1], vec![2.0, 1.0]);
+
+    assert_eq!(g.get_edges(0), ([2, 1].as_slice(), [2.0, 1.0].as_slice()));
+    assert_eq!(g.get_edges(1), ([2, 0].as_slice(), [1.0, 1.0].as_slice()));
+    assert_eq!(g.get_edges(2), ([0, 1].as_slice(), [2.0, 1.0].as_slice()));
+  }
+
+  #[test]
+  #[should_panic]
+  fn test_insert_vertex_panic_too_many_vertex() {
+    let mut g = DenseKNNGraph::empty(2, 2);
+    g.insert_vertex(0, vec![2,1], vec![2.0, 1.0]);
+    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
+    g.insert_vertex(2, vec![0,1], vec![2.0, 1.0]);
+  }
+
+  #[test]
+  #[should_panic]
+  fn test_insert_vertex_panic_wrong_neighbor_length() {
+    let mut g = DenseKNNGraph::empty(2, 2);
+    g.insert_vertex(0, vec![2,1,0], vec![2.0, 1.0, 10.1]);
+    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
+  }
+
+  #[test]
+  fn test_insert_edge_if_closer() {
+    let mut g = DenseKNNGraph::empty(3, 1);
+    g.insert_vertex(0, vec![2], vec![2.0]);
+    g.insert_vertex(1, vec![2], vec![1.0]);
+    g.insert_vertex(2, vec![1], vec![1.0]);
+
+    assert_eq!(g.get_edges(0), ([2].as_slice(), [2.0].as_slice()));
+
+    assert!(g.insert_edge_if_closer(0, 1, 1.0));
+
+    assert_eq!(g.get_edges(0), ([1].as_slice(), [1.0].as_slice()));
+    assert_eq!(g.get_edges(1), ([2].as_slice(), [1.0].as_slice()));
+    assert_eq!(g.get_edges(2), ([1].as_slice(), [1.0].as_slice()));
   }
 }
