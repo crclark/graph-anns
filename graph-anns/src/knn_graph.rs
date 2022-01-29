@@ -17,15 +17,24 @@ use Ordering;
 // TODO: if a single-threaded graph construction algorithm is sufficient for
 // good performance, remove all the atomics and mutexes? But if we want to
 // support concurrent insert and query, we would still need them.
+// --
+// New wrinkle: we need to be able to insert nodes. That means we need to be
+// able to (virtually or actually) resize the vector of edges, AND keep track of
+// the number of vertices in the graph in total. That requires coordinated
+// updates to multiple fields in the struct, which means we might as well remove
+// all the internal atomics/mutexes and forget about fine-grained parallel
+// access to this data structure. Instead, just wrap the whole thing in a
+// read/write lock. Revisit if Rust ever gains an STM library.
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
-/// Nodes are u32s numbered from 0 to n-1. Each element of each node's adjacency
-/// list is an AtomicU32, to enable the implementation of parallelized
-/// heuristic algorithms.
+/// Nodes are u32s numbered from 0 to n-1.
 pub struct DenseKNNGraph {
   /// n, the number of vertices in the graph. The valid indices of the graph
   /// are 0 to n-1.
   pub num_vertices: u32,
+  /// The max number of vertices that can be inserted into the graph. Constant.
+  pub capacity: u32,
   /// The number of neighbors of each vertex. This is a constant.
   pub out_degree: u32,
   /// The underlying buffer of n*num_vertices AtomicU32s. Use with caution.
@@ -43,17 +52,21 @@ pub struct DenseKNNGraph {
 impl DenseKNNGraph {
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
-  fn empty(num_vertices: u32, out_degree: u32) -> DenseKNNGraph {
-    let mut edges = Vec::with_capacity(num_vertices as usize * out_degree as usize);
-    let mut edge_distances = Vec::with_capacity(num_vertices as usize * out_degree as usize);
+  fn empty(capacity: u32, out_degree: u32) -> DenseKNNGraph {
+    let mut edges = Vec::with_capacity(capacity as usize * out_degree as usize);
+    let mut edge_distances = Vec::with_capacity(capacity as usize * out_degree as usize);
 
-    let mut backpointers = Vec::with_capacity(num_vertices as usize);
+    let mut backpointers = Vec::with_capacity(capacity as usize);
 
-    for u in 0..num_vertices {
+    for u in 0..capacity {
       backpointers.push(Mutex::new(SetU32::new()));
     }
+
+    let num_vertices = 0;
+
     DenseKNNGraph {
       num_vertices,
+      capacity,
       out_degree,
       edges,
       edge_distances,
@@ -90,8 +103,10 @@ impl DenseKNNGraph {
 
     if self.edges.len() != self.num_vertices as usize * self.out_degree as usize {
       panic!(
-        "edges.len() is not equal to num_vertices * out_degree. edge.len() is {}",
-        self.edges.len()
+        "edges.len() is not equal to num_vertices * out_degree. {} != {} * {}",
+        self.edges.len(),
+        self.num_vertices,
+        self.out_degree
       );
     }
 
@@ -145,7 +160,7 @@ impl Ord for SearchResult {
 
 /// Perform beam search for the k nearest neighbors of a point q. Returns
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
-/// This is a translation of the pseudocode from
+/// This is a translation of the pseudocode of algorithm 1 from
 /// Approximate k-NN Graph Construction: A Generic Online Approach
 fn knn_beam_search<R: RngCore>(
   g: DenseKNNGraph,
@@ -194,8 +209,6 @@ fn knn_beam_search<R: RngCore>(
     }
 
     let (r_out, _) = g.get_edges(r.vec_index);
-    // TODO: since this algo actually needs the backpointers, add them to
-    // the graph struct.
     let mut r_nbrs = {
       let r = g.backpointers[r.vec_index as usize].lock();
       r.clone()
@@ -222,8 +235,11 @@ fn knn_beam_search<R: RngCore>(
 }
 
 /// Constructs an exact k-nn graph on the first n items in db. O(n^2).
+/// `capacity` is max capacity of the returned graph (for future inserts).
+/// Must be >= n.
 fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   n: u32,
+  capacity: u32,
   k: u32,
   db: &C,
   dist_fn: fn(&T, &T) -> f32,
@@ -232,7 +248,7 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
     panic!("k must be less than n");
   }
 
-  let mut g = DenseKNNGraph::empty(n, k);
+  let mut g = DenseKNNGraph::empty(capacity, k);
 
   for i in 0..n {
     let mut knn = BinaryHeap::new();
@@ -255,6 +271,8 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
       s.insert(i);
     }
   }
+
+  g.num_vertices = n;
 
   g
 }
@@ -474,7 +492,7 @@ mod tests {
   #[test]
   fn test_exhaustive_knn_graph() {
     let db = vec![[1], [2], [3], [10], [11], [12]];
-    let g = exhaustive_knn_graph(6, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let g = exhaustive_knn_graph(6, 10, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
     g.consistency_check();
     assert_eq!(g.get_edges_inconsistent(0), vec![2, 1]);
     assert_eq!(g.get_edges_inconsistent(1), vec![2, 0]);
@@ -487,7 +505,7 @@ mod tests {
   #[test]
   fn test_beam_search_fully_connected_graph() {
     let db = vec![[1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
-    let g = exhaustive_knn_graph(6, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let g = exhaustive_knn_graph(6, 10, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let q = [1.2f32];
