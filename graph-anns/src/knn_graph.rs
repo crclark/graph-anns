@@ -1,14 +1,10 @@
-use atomic_float::AtomicF32;
 use nohash_hasher::IntMap;
-use parking_lot::Mutex;
 use rand::distributions::{Distribution, Uniform};
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Instant;
 use tinyset::SetU32;
@@ -41,25 +37,25 @@ pub struct DenseKNNGraph {
   /// Prefer to use indexing to access the neighbors of a vertex.
   /// `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
   /// with their distances from i.
-  pub edges: Vec<AtomicU32>,
-  pub edge_distances: Vec<AtomicF32>,
+  pub edges: Vec<u32>,
+  pub edge_distances: Vec<f32>,
   /// Maintains an association between vertices and the vertices that link out to
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
-  pub backpointers: Vec<Mutex<SetU32>>,
+  pub backpointers: Vec<SetU32>,
 }
 
 impl DenseKNNGraph {
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   fn empty(capacity: u32, out_degree: u32) -> DenseKNNGraph {
-    let mut edges = Vec::with_capacity(capacity as usize * out_degree as usize);
-    let mut edge_distances = Vec::with_capacity(capacity as usize * out_degree as usize);
+    let edges = Vec::with_capacity(capacity as usize * out_degree as usize);
+    let edge_distances = Vec::with_capacity(capacity as usize * out_degree as usize);
 
     let mut backpointers = Vec::with_capacity(capacity as usize);
 
     for u in 0..capacity {
-      backpointers.push(Mutex::new(SetU32::new()));
+      backpointers.push(SetU32::new());
     }
 
     let num_vertices = 0;
@@ -74,25 +70,13 @@ impl DenseKNNGraph {
     }
   }
 
-  pub fn get_edges(&self, index: u32) -> (&[AtomicU32], &[AtomicF32]) {
+  pub fn get_edges(&self, index: u32) -> (&[u32], &[f32]) {
     let i = index * self.out_degree;
     let j = i + self.out_degree;
     (
       &self.edges[i as usize..j as usize],
       &self.edge_distances[i as usize..j as usize],
     )
-  }
-
-  /// Returns an inconsistent snapshot of the neighbors of index.
-  /// Use for testing, debugging, and in heuristic algorithms where
-  /// consistency is less important.
-  fn get_edges_inconsistent(&self, index: u32) -> Vec<u32> {
-    let (edges, _) = self.get_edges(index);
-    let mut ret = Vec::new();
-    for e in edges {
-      ret.push(e.load(Relaxed));
-    }
-    ret
   }
 
   /// Panics if graph is internally inconsistent.
@@ -113,13 +97,12 @@ impl DenseKNNGraph {
     for i in 0..self.num_vertices {
       let (nbrs, _) = self.get_edges(i);
       for nbr in nbrs.iter() {
-        let nbr_loaded = nbr.load(Relaxed);
-        if nbr_loaded == i {
+        if *nbr == i {
           panic!("Self loop at node {}", i);
         }
-        let nbr_backptrs = self.backpointers[nbr_loaded as usize].lock();
+        let nbr_backptrs = &self.backpointers[*nbr as usize];
         if !nbr_backptrs.contains(i) {
-          panic!("backpointer missing for vertex {} on nbr {}", i, nbr_loaded);
+          panic!("backpointer missing for vertex {} on nbr {}", i, nbr);
         }
       }
     }
@@ -209,12 +192,9 @@ fn knn_beam_search<R: RngCore>(
     }
 
     let (r_out, _) = g.get_edges(r.vec_index);
-    let mut r_nbrs = {
-      let r = g.backpointers[r.vec_index as usize].lock();
-      r.clone()
-    };
+    let mut r_nbrs = g.backpointers[r.vec_index as usize].clone();
     for nbr in r_out.iter() {
-      r_nbrs.insert(nbr.load(Relaxed));
+      r_nbrs.insert(*nbr);
     }
 
     for e in r_nbrs.iter() {
@@ -244,7 +224,7 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   db: &C,
   dist_fn: fn(&T, &T) -> f32,
 ) -> DenseKNNGraph {
-  if (k >= n) {
+  if k >= n {
     panic!("k must be less than n");
   }
 
@@ -265,9 +245,9 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
     }
     while knn.len() > 0 {
       let SearchResult { vec_index, dist } = knn.pop().unwrap();
-      g.edges.push(AtomicU32::new(vec_index));
-      g.edge_distances.push(AtomicF32::new(dist));
-      let mut s = g.backpointers[vec_index as usize].lock();
+      g.edges.push(vec_index);
+      g.edge_distances.push(dist);
+      let s = &mut g.backpointers[vec_index as usize];
       s.insert(i);
     }
   }
@@ -347,9 +327,9 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
     for nbr_ix in 0..out_degree {
       let v = rand_vertex.sample(prng);
       let distance = get_dist(u, v, db, dist_fn);
-      g.edges.push(AtomicU32::new(v));
-      g.edge_distances.push(AtomicF32::new(distance));
-      let mut s = g.backpointers[v as usize].lock();
+      g.edges.push(v);
+      g.edge_distances.push(distance);
+      let s = &mut g.backpointers[v as usize];
       s.insert(u);
     }
 
@@ -494,12 +474,12 @@ mod tests {
     let db = vec![[1], [2], [3], [10], [11], [12]];
     let g = exhaustive_knn_graph(6, 10, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
     g.consistency_check();
-    assert_eq!(g.get_edges_inconsistent(0), vec![2, 1]);
-    assert_eq!(g.get_edges_inconsistent(1), vec![2, 0]);
-    assert_eq!(g.get_edges_inconsistent(2), vec![0, 1]);
-    assert_eq!(g.get_edges_inconsistent(3), vec![5, 4]);
-    assert_eq!(g.get_edges_inconsistent(4), vec![3, 5]);
-    assert_eq!(g.get_edges_inconsistent(5), vec![3, 4]);
+    assert_eq!(g.get_edges(0).0, vec![2, 1]);
+    assert_eq!(g.get_edges(1).0, vec![2, 0]);
+    assert_eq!(g.get_edges(2).0, vec![0, 1]);
+    assert_eq!(g.get_edges(3).0, vec![5, 4]);
+    assert_eq!(g.get_edges(4).0, vec![3, 5]);
+    assert_eq!(g.get_edges(5).0, vec![3, 4]);
   }
 
   #[test]
