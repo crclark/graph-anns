@@ -1,4 +1,5 @@
 #![feature(total_cmp)]
+#![feature(is_sorted)]
 extern crate atomic_float;
 extern crate nix;
 extern crate nohash_hasher;

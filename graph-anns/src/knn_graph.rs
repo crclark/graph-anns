@@ -91,6 +91,11 @@ impl DenseKNNGraph {
     &mut self.edges[i as usize..j as usize]
   }
 
+  fn sort_edges(&mut self, index: u32) {
+    let edges = self.get_edges_mut(index);
+    edges.sort_by(|a,b| a.1.total_cmp(&b.1));
+  }
+
   /// Creates an edge from `from` to `to` if the distance `dist` between them is
   /// less than the distance from `from` to one of its existing neighbors `u`.
   /// If so, removes the edge (`from`, `u`).
@@ -99,18 +104,17 @@ impl DenseKNNGraph {
   ///
   /// Returns `true` if the new edge was added.
   fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
+    let most_distant_ix = (self.out_degree - 1) as usize;
     let edges = self.get_edges_mut(from);
 
-    // TODO: wrong. Need to replace most distant existing neighbor only, so that
-    // we maintain the property that the neighbors are the k-nearest.
-    for (nbr, nbr_dist, _) in edges.iter_mut() {
-      // TODO: also need to update lambdas of neighbors, but we should do that
-      // in a separate function, I think, if this one returns true.
-      if dist < *nbr_dist {
-        *nbr = to;
-        *nbr_dist = dist;
-        return true;
-      }
+    if dist < edges[most_distant_ix].1 {
+      let old = edges[most_distant_ix].0;
+      edges[most_distant_ix].0 = to;
+      edges[most_distant_ix].1 = dist;
+      edges[most_distant_ix].2 = DEFAULT_LAMBDA;
+      self.sort_edges(from);
+      self.backpointers[old as usize].remove(from);
+      return true;
     }
 
     return false;
@@ -154,6 +158,12 @@ impl DenseKNNGraph {
         if !nbr_backptrs.contains(i) {
           panic!("backpointer missing for vertex {} on nbr {}", i, nbr);
         }
+      }
+
+      assert!(self.get_edges(i).is_sorted_by_key(|e| e.1));
+
+      for referrer in self.backpointers[i as usize].iter() {
+        assert!(self.debug_get_neighbor_indices(referrer).contains(&i));
       }
     }
   }
@@ -301,6 +311,10 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   }
 
   g.num_vertices = n;
+
+  for i in 0..n {
+    g.sort_edges(i)
+  }
 
   g
 }
@@ -521,12 +535,12 @@ mod tests {
     let db = vec![[1], [2], [3], [10], [11], [12]];
     let g = exhaustive_knn_graph(6, 10, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
     g.consistency_check();
-    assert_eq!(g.debug_get_neighbor_indices(0), vec![2, 1]);
+    assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
     assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
-    assert_eq!(g.debug_get_neighbor_indices(2), vec![0, 1]);
-    assert_eq!(g.debug_get_neighbor_indices(3), vec![5, 4]);
+    assert_eq!(g.debug_get_neighbor_indices(2), vec![1, 0]);
+    assert_eq!(g.debug_get_neighbor_indices(3), vec![4, 5]);
     assert_eq!(g.debug_get_neighbor_indices(4), vec![3, 5]);
-    assert_eq!(g.debug_get_neighbor_indices(5), vec![3, 4]);
+    assert_eq!(g.debug_get_neighbor_indices(5), vec![4, 3]);
   }
 
   #[test]
