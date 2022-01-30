@@ -10,6 +10,8 @@ use std::time::Instant;
 use tinyset::SetU32;
 use Ordering;
 
+const DEFAULT_LAMBDA: u8 = 0;
+
 // NOTE: we need to be able to insert nodes. That means we need to be
 // able to (virtually or actually) resize the vector of edges, AND keep track of
 // the number of vertices in the graph in total. That requires coordinated
@@ -29,12 +31,14 @@ pub struct DenseKNNGraph {
   pub capacity: u32,
   /// The number of neighbors of each vertex. This is a constant.
   pub out_degree: u32,
-  /// The underlying buffer of n*num_vertices AtomicU32s. Use with caution.
+  /// The underlying buffer of num_vertices*out_degree neighbor information.
+  /// An adjacency list of (node id, distance, lambda crowding factor
+  /// (not yet implemented, always zero)).
+  /// Use with caution.
   /// Prefer to use indexing to access the neighbors of a vertex.
   /// `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
   /// with their distances from i.
-  pub edges: Vec<u32>,
-  pub edge_distances: Vec<f32>,
+  pub edges: Vec<(u32, f32, u8)>,
   /// Maintains an association between vertices and the vertices that link out to
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
@@ -46,7 +50,6 @@ impl DenseKNNGraph {
   /// doesn't populate the edges.
   fn empty(capacity: u32, out_degree: u32) -> DenseKNNGraph {
     let edges = Vec::with_capacity(capacity as usize * out_degree as usize);
-    let edge_distances = Vec::with_capacity(capacity as usize * out_degree as usize);
 
     let mut backpointers = Vec::with_capacity(capacity as usize);
 
@@ -61,34 +64,31 @@ impl DenseKNNGraph {
       capacity,
       out_degree,
       edges,
-      edge_distances,
       backpointers,
     }
   }
 
   /// Get the neighbors of u and their distances. Panics if index
   /// >= num_vertices.
-  pub fn get_edges(&self, index: u32) -> (&[u32], &[f32]) {
+  pub fn get_edges(&self, index: u32) -> &[(u32,f32,u8)] {
     assert!(index < self.num_vertices);
 
     let i = index * self.out_degree;
     let j = i + self.out_degree;
-    (
-      &self.edges[i as usize..j as usize],
-      &self.edge_distances[i as usize..j as usize],
-    )
+    &self.edges[i as usize..j as usize]
+  }
+
+  fn debug_get_neighbor_indices(&self, index: u32) -> Vec<u32> {
+    self.get_edges(index).iter().map(|e| e.0).collect()
   }
 
   /// Get the neighbors of u and their distances. Panics if index >= num_vertices.
-  fn get_edges_mut(&mut self, index: u32) -> (&mut [u32], &mut [f32]) {
+  fn get_edges_mut(&mut self, index: u32) -> &mut [(u32, f32, u8)] {
     assert!(index < self.num_vertices);
 
     let i = index * self.out_degree;
     let j = i + self.out_degree;
-    (
-      &mut self.edges[i as usize..j as usize],
-      &mut self.edge_distances[i as usize..j as usize],
-    )
+    &mut self.edges[i as usize..j as usize]
   }
 
   /// Creates an edge from `from` to `to` if the distance `dist` between them is
@@ -99,9 +99,13 @@ impl DenseKNNGraph {
   ///
   /// Returns `true` if the new edge was added.
   fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
-    let (mut nbrs, mut dists) = self.get_edges_mut(from);
+    let edges = self.get_edges_mut(from);
 
-    for (nbr, nbr_dist) in nbrs.iter_mut().zip(dists) {
+    // TODO: wrong. Need to replace most distant existing neighbor only, so that
+    // we maintain the property that the neighbors are the k-nearest.
+    for (nbr, nbr_dist, _) in edges.iter_mut() {
+      // TODO: also need to update lambdas of neighbors, but we should do that
+      // in a separate function, I think, if this one returns true.
       if dist < *nbr_dist {
         *nbr = to;
         *nbr_dist = dist;
@@ -121,8 +125,7 @@ impl DenseKNNGraph {
     assert!(nbrs.len() == od && dists.len() == od);
 
     for (nbr, dist) in nbrs.iter().zip(dists) {
-      self.edges.push(*nbr);
-      self.edge_distances.push(dist);
+      self.edges.push((*nbr, dist, DEFAULT_LAMBDA));
       let s = &mut self.backpointers[*nbr as usize];
       s.insert(u);
     }
@@ -132,9 +135,6 @@ impl DenseKNNGraph {
 
   /// Panics if graph is internally inconsistent.
   fn consistency_check(&self) {
-    if self.edges.len() != self.edge_distances.len() {
-      panic!("edges and edge_distances are inconsistent lengths");
-    }
 
     if self.edges.len() != self.num_vertices as usize * self.out_degree as usize {
       panic!(
@@ -146,8 +146,7 @@ impl DenseKNNGraph {
     }
 
     for i in 0..self.num_vertices {
-      let (nbrs, _) = self.get_edges(i);
-      for nbr in nbrs.iter() {
+      for (nbr, _, _) in self.get_edges(i).iter() {
         if *nbr == i {
           panic!("Self loop at node {}", i);
         }
@@ -242,9 +241,8 @@ fn knn_beam_search<R: RngCore>(
       break;
     }
 
-    let (r_out, _) = g.get_edges(r.vec_index);
     let mut r_nbrs = g.backpointers[r.vec_index as usize].clone();
-    for nbr in r_out.iter() {
+    for (nbr, _, _) in g.get_edges(r.vec_index).iter() {
       r_nbrs.insert(*nbr);
     }
 
@@ -296,8 +294,7 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
     }
     while knn.len() > 0 {
       let SearchResult { vec_index, dist } = knn.pop().unwrap();
-      g.edges.push(vec_index);
-      g.edge_distances.push(dist);
+      g.edges.push((vec_index, dist, DEFAULT_LAMBDA));
       let s = &mut g.backpointers[vec_index as usize];
       s.insert(i);
     }
@@ -378,8 +375,7 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
     for nbr_ix in 0..out_degree {
       let v = rand_vertex.sample(prng);
       let distance = get_dist(u, v, db, dist_fn);
-      g.edges.push(v);
-      g.edge_distances.push(distance);
+      g.edges.push((v, distance, DEFAULT_LAMBDA));
       let s = &mut g.backpointers[v as usize];
       s.insert(u);
     }
@@ -525,12 +521,12 @@ mod tests {
     let db = vec![[1], [2], [3], [10], [11], [12]];
     let g = exhaustive_knn_graph(6, 10, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
     g.consistency_check();
-    assert_eq!(g.get_edges(0).0, vec![2, 1]);
-    assert_eq!(g.get_edges(1).0, vec![2, 0]);
-    assert_eq!(g.get_edges(2).0, vec![0, 1]);
-    assert_eq!(g.get_edges(3).0, vec![5, 4]);
-    assert_eq!(g.get_edges(4).0, vec![3, 5]);
-    assert_eq!(g.get_edges(5).0, vec![3, 4]);
+    assert_eq!(g.debug_get_neighbor_indices(0), vec![2, 1]);
+    assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
+    assert_eq!(g.debug_get_neighbor_indices(2), vec![0, 1]);
+    assert_eq!(g.debug_get_neighbor_indices(3), vec![5, 4]);
+    assert_eq!(g.debug_get_neighbor_indices(4), vec![3, 5]);
+    assert_eq!(g.debug_get_neighbor_indices(5), vec![3, 4]);
   }
 
   #[test]
@@ -560,9 +556,9 @@ mod tests {
     g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0,1], vec![2.0, 1.0]);
 
-    assert_eq!(g.get_edges(0), ([2, 1].as_slice(), [2.0, 1.0].as_slice()));
-    assert_eq!(g.get_edges(1), ([2, 0].as_slice(), [1.0, 1.0].as_slice()));
-    assert_eq!(g.get_edges(2), ([0, 1].as_slice(), [2.0, 1.0].as_slice()));
+    assert_eq!(g.get_edges(0), [(2, 2.0, 0), (1, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(1), [(2, 1.0, 0), (0, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(2), [(0, 2.0, 0), (1, 1.0, 0)].as_slice());
   }
 
   #[test]
@@ -589,12 +585,12 @@ mod tests {
     g.insert_vertex(1, vec![2], vec![1.0]);
     g.insert_vertex(2, vec![1], vec![1.0]);
 
-    assert_eq!(g.get_edges(0), ([2].as_slice(), [2.0].as_slice()));
+    assert_eq!(g.get_edges(0), [(2, 2.0, 0)].as_slice());
 
     assert!(g.insert_edge_if_closer(0, 1, 1.0));
 
-    assert_eq!(g.get_edges(0), ([1].as_slice(), [1.0].as_slice()));
-    assert_eq!(g.get_edges(1), ([2].as_slice(), [1.0].as_slice()));
-    assert_eq!(g.get_edges(2), ([1].as_slice(), [1.0].as_slice()));
+    assert_eq!(g.get_edges(0), [(1, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(1), [(2, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(2), [(1, 1.0, 0)].as_slice());
   }
 }
