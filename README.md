@@ -5,6 +5,16 @@ store them in FDB in a way that allows for efficient nearest-neighbor queries.
 
 There are, of course, many metric trees, such as cover trees, vantage point trees, slim-trees, split-trees, etc., but they are designed (mostly) on the assumption that the tree will be stored in memory. I need something that is amenable to storage in FDB.
 
+## Current status
+
+The Haskell code in the root of this directory is abandoned. I am currently focusing on the `graph-anns` directory, which contains Rust code.
+
+Projects:
+
+1. Root dir, Haskell -- Hilbert curve-based code. Abandoned because Hilbert curves are a huge pain.
+2. `bruteforce/` dir, C++ -- brute force search through entire datasets. *Also includes a utility to convert a [test corpus](http://corpus-texmex.irisa.fr/) into a plain old C array which can be mmaped*.
+3. `graph-anns/` dir, Rust -- an implementation of something similar to [Approximate k-NN graph construction: a generic online approach](https://arxiv.org/pdf/1804.03032), with several extensions. This is the actively developed project. It also contains utilities to read the mmaped format created by `bruteforce/`.
+
 ## Requirements
 
 Let's be absurdly ambitious. What fun is a side project if it's not?
