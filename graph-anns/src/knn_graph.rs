@@ -1,11 +1,11 @@
 use nohash_hasher::IntMap;
 use rand::distributions::{Distribution, Uniform};
+use rand::seq::index::sample;
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
-use std::sync::Arc;
 use std::time::Instant;
 use tinyset::SetU32;
 use Ordering;
@@ -20,9 +20,12 @@ const DEFAULT_LAMBDA: u8 = 0;
 // access to this data structure. Instead, just wrap the whole thing in a
 // read/write lock. Revisit if Rust ever gains an STM library.
 
+// TODO: revisit every use of `pub` in this file.
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
+#[derive(Debug)]
 pub struct DenseKNNGraph {
   /// n, the number of vertices in the graph. The valid indices of the graph
   /// are 0 to n-1.
@@ -43,6 +46,14 @@ pub struct DenseKNNGraph {
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
   pub backpointers: Vec<SetU32>,
+  /// Whether to use restricted recursive neighborhood propagation. This improves
+  /// search speed, but decreases insertion throughput. TODO: verify that's
+  /// true.
+  use_rrnp: bool,
+  /// Whether to use lazy graph diversification. This improves search speed.
+  /// TODO: parametrize this type so that the LGD vector is never allocated/
+  /// takes no memory if this is set to false.
+  use_lgd: bool,
 }
 
 impl DenseKNNGraph {
@@ -53,11 +64,15 @@ impl DenseKNNGraph {
 
     let mut backpointers = Vec::with_capacity(capacity as usize);
 
-    for u in 0..capacity {
+    for _ in 0..capacity {
       backpointers.push(SetU32::new());
     }
 
     let num_vertices = 0;
+
+    // TODO: expose as params once supported.
+    let use_rrnp = false;
+    let use_lgd = false;
 
     DenseKNNGraph {
       num_vertices,
@@ -65,12 +80,14 @@ impl DenseKNNGraph {
       out_degree,
       edges,
       backpointers,
+      use_rrnp,
+      use_lgd,
     }
   }
 
   /// Get the neighbors of u and their distances. Panics if index
   /// >= num_vertices.
-  pub fn get_edges(&self, index: u32) -> &[(u32,f32,u8)] {
+  pub fn get_edges(&self, index: u32) -> &[(u32, f32, u8)] {
     assert!(index < self.num_vertices);
 
     let i = index * self.out_degree;
@@ -93,7 +110,7 @@ impl DenseKNNGraph {
 
   fn sort_edges(&mut self, index: u32) {
     let edges = self.get_edges_mut(index);
-    edges.sort_by(|a,b| a.1.total_cmp(&b.1));
+    edges.sort_by(|a, b| a.1.total_cmp(&b.1));
   }
 
   /// Creates an edge from `from` to `to` if the distance `dist` between them is
@@ -114,6 +131,7 @@ impl DenseKNNGraph {
       edges[most_distant_ix].2 = DEFAULT_LAMBDA;
       self.sort_edges(from);
       self.backpointers[old as usize].remove(from);
+      self.backpointers[to as usize].insert(from);
       return true;
     }
 
@@ -121,7 +139,8 @@ impl DenseKNNGraph {
   }
 
   /// Insert a new vertex into the graph, given its k neighbors and their
-  /// distances. Panics if num_vertices == capacity.
+  /// distances. Panics if the graph is already full (num_vertices == capacity).
+  /// nbrs and dists must be equal to the out_degree of the graph.
   fn insert_vertex(&mut self, u: u32, nbrs: Vec<u32>, dists: Vec<f32>) {
     assert!(self.num_vertices < self.capacity);
 
@@ -129,17 +148,28 @@ impl DenseKNNGraph {
     assert!(nbrs.len() == od && dists.len() == od);
 
     for (nbr, dist) in nbrs.iter().zip(dists) {
+      println!("Connecting {} to {}", u, nbr);
       self.edges.push((*nbr, dist, DEFAULT_LAMBDA));
       let s = &mut self.backpointers[*nbr as usize];
       s.insert(u);
     }
 
     self.num_vertices += 1;
+    self.sort_edges(u);
+  }
+
+  pub fn debug_print(&self) {
+    println!("### Adjacency list (index, distance, lambda)");
+    for i in 0..self.num_vertices {
+      println!("Node {}", i);
+      println!("{:#?}", self.get_edges(i));
+    }
+    println!("### Backpointers");
+    println!("{:#?}", self.backpointers);
   }
 
   /// Panics if graph is internally inconsistent.
   fn consistency_check(&self) {
-
     if self.edges.len() != self.num_vertices as usize * self.out_degree as usize {
       panic!(
         "edges.len() is not equal to num_vertices * out_degree. {} != {} * {}",
@@ -156,7 +186,10 @@ impl DenseKNNGraph {
         }
         let nbr_backptrs = &self.backpointers[*nbr as usize];
         if !nbr_backptrs.contains(i) {
-          panic!("backpointer missing for vertex {} on nbr {}", i, nbr);
+          panic!(
+            "Vertex {} links to {} but {}'s backpointers don't include {}!",
+            i, nbr, nbr, i
+          );
         }
       }
 
@@ -206,23 +239,25 @@ impl Ord for SearchResult {
 /// This is a translation of the pseudocode of algorithm 1 from
 /// Approximate k-NN Graph Construction: A Generic Online Approach
 fn knn_beam_search<R: RngCore>(
-  g: DenseKNNGraph,
+  g: &DenseKNNGraph,
   dist_to_q: impl Fn(u32) -> f32,
   num_searchers: usize,
   k: usize,
   prng: &mut R,
 ) -> (BinaryHeap<SearchResult>, SetU32, IntMap<u32, f32>) {
+  assert!(num_searchers <= g.num_vertices as usize);
+  assert!(k <= g.num_vertices as usize);
   let mut q_max_heap: BinaryHeap<SearchResult> = BinaryHeap::new();
   let mut r_min_heap: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
   let mut visited = SetU32::new();
   let mut visited_distances: IntMap<u32, f32> = IntMap::default();
 
-  let rand_vertex = Uniform::from(0..g.num_vertices);
-
   // lines 2 to 10 of the pseudocode
-  for i in 0..num_searchers {
-    let r = rand_vertex.sample(prng);
+  for r in sample(prng, g.num_vertices as usize, num_searchers) {
+    let r = r as u32;
     let r_dist = dist_to_q(r);
+    visited.insert(r);
+    visited_distances.insert(r, r_dist);
     r_min_heap.push(Reverse(SearchResult::new(r, r_dist)));
     match q_max_heap.peek() {
       None => {
@@ -319,6 +354,72 @@ fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   g
 }
 
+fn rrnp(
+  _g: &mut DenseKNNGraph,
+  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
+  _visited_nodes: &SetU32,
+  _visited_nodes_distance_to_q: &IntMap<u32, f32>,
+) -> () {
+  unimplemented!()
+}
+
+fn apply_lgd(
+  _g: &mut DenseKNNGraph,
+  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
+  _visited_nodes: &SetU32,
+  _visited_nodes_distance_to_q: &IntMap<u32, f32>,
+) -> () {
+  unimplemented!()
+}
+
+/// Inserts a new data point into the graph. The graph must not be full.
+/// Optionally performs restricted recursive neighborhood propagation and
+/// lazy graph diversification. These options are set when the graph is
+/// constructed.
+///
+/// This is equivalent to one iteration of Algorithm 3 in
+/// "Approximate k-NN Graph Construction: A Generic Online Approach".
+fn insert_approx<R: RngCore>(
+  g: &mut DenseKNNGraph,
+  q: u32,
+  dist_to_q: impl Fn(u32) -> f32,
+  num_searchers: usize,
+  prng: &mut R,
+) -> () {
+  //TODO: return the index of the new data point
+  let (nearest_neighbors_max_dist_heap, visited_nodes, visited_nodes_distance_to_q) =
+    knn_beam_search(g, dist_to_q, num_searchers, g.out_degree as usize, prng);
+
+  if g.use_rrnp {
+    rrnp(
+      g,
+      &nearest_neighbors_max_dist_heap,
+      &visited_nodes,
+      &visited_nodes_distance_to_q,
+    );
+  } else {
+    let (neighbors, dists) = nearest_neighbors_max_dist_heap
+      .iter()
+      .map(|sr| (sr.vec_index, sr.dist))
+      .unzip();
+    g.insert_vertex(q, neighbors, dists);
+
+    //TODO: try to avoid clone
+    for r in visited_nodes.clone() {
+      g.insert_edge_if_closer(r, q, visited_nodes_distance_to_q[&r]);
+    }
+  }
+
+  if g.use_lgd {
+    apply_lgd(
+      g,
+      &nearest_neighbors_max_dist_heap,
+      &visited_nodes,
+      &visited_nodes_distance_to_q,
+    );
+  }
+}
+
 // TODO: wrap db and dist_fn in a struct and make this a method on it.
 // TODO: avoid passing db at all? We need to support incremental data.
 fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
@@ -386,7 +487,7 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
     let (ix_range_low, ix_range_high) = chunk_range(num_vertices, num_partitions, u);
     let rand_vertex = Uniform::from(ix_range_low..ix_range_high);
 
-    for nbr_ix in 0..out_degree {
+    for _ in 0..out_degree {
       let v = rand_vertex.sample(prng);
       let distance = get_dist(u, v, db, dist_fn);
       g.edges.push((v, distance, DEFAULT_LAMBDA));
@@ -401,32 +502,21 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
   g
 }
 
-// TODO: consider doing this when we want to overlay the permutation-based graph
-// with the K-NN graph. It is trivial to implement Fits64 for
-// (AtomicU32, AtomicF32). It will allow us to implement variable out-degree
-// per vertex while keeping memory consumption in check. Oops, wait, would this
-// actually work? Would it be creating new atomics each time? Instead, if we
-// need variable out-degree, let's reserve u32::max as the empty value.
-
-// pub struct Foo {
-//   pub bar: Set64<(AtomicU32, AtomicF32)>,
-// }
-
 // Performs the NN-descent algorithm on a subset of the vertices of the graph.
 // Early stopping occurs when the number of successful updates in an iteration
 // is less than `delta*k*(j-i)`.
-fn nn_descent_thread<R: RngCore>(
-  // Lower bound (inclusive) node that this thread is responsible for
-  i: u32,
-  // Upper bound (exclusive) node that this thread is responsible for
-  j: u32,
-  // Early stopping parameter. Suggested default from the paper: 0.001.
-  delta: f64,
-  g: Arc<DenseKNNGraph>,
-  prng: R,
-) -> () {
-  unimplemented!()
-}
+// fn nn_descent_thread<R: RngCore>(
+//   // Lower bound (inclusive) node that this thread is responsible for
+//   i: u32,
+//   // Upper bound (exclusive) node that this thread is responsible for
+//   j: u32,
+//   // Early stopping parameter. Suggested default from the paper: 0.001.
+//   delta: f64,
+//   g: Arc<DenseKNNGraph>,
+//   prng: R,
+// ) -> () {
+//   unimplemented!()
+// }
 
 // TODO: use the triangle inequality to short-circuit the comparisons. Say we have
 // a -> b -> c and we are working on a. We have already stored d(a,b) and d(b,c).
@@ -467,16 +557,16 @@ fn nn_descent_thread<R: RngCore>(
 // - We don't do the "local join" trick described in Section 2.3. There's no
 //   reason why we couldn't, but it's extra code complexity that doesn't yet
 //   seem to be warranted.
-pub fn nn_descent_parallel<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
-  num_threads: usize,
-  k: usize,
-  db: &C,
-  // TODO: parametrize the type of the distances so we can use much faster
-  // i32 if possible.
-  dist_fn: fn(&T, &T) -> f32,
-) -> DenseKNNGraph {
-  unimplemented!()
-}
+// pub fn nn_descent_parallel<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
+//   num_threads: usize,
+//   k: usize,
+//   db: &C,
+//   // TODO: parametrize the type of the distances so we can use much faster
+//   // i32 if possible.
+//   dist_fn: fn(&T, &T) -> f32,
+// ) -> DenseKNNGraph {
+//   unimplemented!()
+// }
 
 #[cfg(test)]
 mod tests {
@@ -551,7 +641,7 @@ mod tests {
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let q = [1.2f32];
     let (nearest, _, _) = knn_beam_search(
-      g,
+      &g,
       |i| sq_euclidean_faster(&db[i as usize], &q),
       1,
       2,
@@ -566,30 +656,30 @@ mod tests {
   #[test]
   fn test_insert_vertex() {
     let mut g = DenseKNNGraph::empty(3, 2);
-    g.insert_vertex(0, vec![2,1], vec![2.0, 1.0]);
-    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
-    g.insert_vertex(2, vec![0,1], vec![2.0, 1.0]);
+    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
+    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
 
-    assert_eq!(g.get_edges(0), [(2, 2.0, 0), (1, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(0), [(1, 1.0, 0), (2, 2.0, 0)].as_slice());
     assert_eq!(g.get_edges(1), [(2, 1.0, 0), (0, 1.0, 0)].as_slice());
-    assert_eq!(g.get_edges(2), [(0, 2.0, 0), (1, 1.0, 0)].as_slice());
+    assert_eq!(g.get_edges(2), [(1, 1.0, 0), (0, 2.0, 0)].as_slice());
   }
 
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
     let mut g = DenseKNNGraph::empty(2, 2);
-    g.insert_vertex(0, vec![2,1], vec![2.0, 1.0]);
-    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
-    g.insert_vertex(2, vec![0,1], vec![2.0, 1.0]);
+    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
+    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
   }
 
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
     let mut g = DenseKNNGraph::empty(2, 2);
-    g.insert_vertex(0, vec![2,1,0], vec![2.0, 1.0, 10.1]);
-    g.insert_vertex(1, vec![2,0], vec![1.0, 1.0]);
+    g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
   }
 
   #[test]
@@ -606,5 +696,34 @@ mod tests {
     assert_eq!(g.get_edges(0), [(1, 1.0, 0)].as_slice());
     assert_eq!(g.get_edges(1), [(2, 1.0, 0)].as_slice());
     assert_eq!(g.get_edges(2), [(1, 1.0, 0)].as_slice());
+  }
+
+  #[test]
+  fn test_insert_approx() {
+    let db = vec![
+      [1f32],
+      [2f32],
+      [3f32],
+      [10f32],
+      [11f32],
+      [12f32],
+      [18f32],
+      [19f32],
+      [20f32],
+      [21f32],
+      [22f32],
+    ];
+    let mut g = exhaustive_knn_graph(6, 11, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    for i in 6..11 {
+      insert_approx(
+        &mut g,
+        i,
+        |j| sq_euclidean_faster(&db[i as usize], &db[j as usize]),
+        5,
+        &mut prng,
+      );
+    }
+    g.consistency_check();
   }
 }
