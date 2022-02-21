@@ -12,15 +12,76 @@ use Ordering;
 
 const DEFAULT_LAMBDA: u8 = 0;
 
-// NOTE: we need to be able to insert nodes. That means we need to be
-// able to (virtually or actually) resize the vector of edges, AND keep track of
-// the number of vertices in the graph in total. That requires coordinated
-// updates to multiple fields in the struct, which means we might as well remove
-// all the internal atomics/mutexes and forget about fine-grained parallel
-// access to this data structure. Instead, just wrap the whole thing in a
-// read/write lock. Revisit if Rust ever gains an STM library.
-
 // TODO: revisit every use of `pub` in this file.
+
+// TODO: many benchmarking utilities. Recall@n  metrics and so forth.
+
+// TODO: benchmark with random data that has lazily-generated distances/vectors.
+// We could use random integers and the bitwise hamming distance between them
+// for speed.
+
+// TODO: I see two possible problems in the paper:
+// 1. Nothing in the paper guarantees the connectivity of the graph.
+// 2. Intuitively, it seems like being able to jump long distances if we are in
+//    a really irrelevant part of the graph would be a good idea.
+//
+// To fix both of these problems, I have an idea. Each node has one extra edge
+// that is used normally for searching, but can't be removed by the insertion
+// algorithm. These edges, taken together, form a permutation of the nodes of
+// the graph, ensuring that we have a route passing through all the nodes. We
+// try to optimize this permutation by swapping, in order to decrease the sum
+// of the distances between successive nodes. Also, the node linked to in this
+// special edge cannot be a node that is already linked to by the normal edges.
+// We could use idle background CPU to optimize this permutation while we wait
+// for requests.
+//
+// We'd need to make this optional and benchmark carefully to verify that it
+// improves performance.
+
+// TODO: deletion. I think this is achievable. Tricky parts are:
+// 1. Backpointers. We need to update an unbounded number of referrers to the
+//    deleted node.
+// 2. Edges. Once we have the referrers, we need to delete one of their edges
+//    that point to the deleted node.
+//    Because we're storing adjacency in a flat Vec, this requires us to
+//    1. Either wrap each element in `Option` or store the length of the edges
+//       subvector for each node (moving invalid items to the end). I am
+//       leaning toward the latter because it should optimize better -- if
+//       the user doesn't want deletion, we don't need to store the lengths at
+//       all, saving memory and reducing calculations.
+//    2. If the out-degree of the node has dropped to zero because of deletions,
+//       we need to fire off a search to find it a new set of `out_degree`
+//       neighbors. If we allow it to stay at zero, it will be unsearchable.
+// 3. Keeping track of which indices are currently deleted. This could be stored
+//    in a vector (pre-allocated to the length `capacity`). Respecting its
+//    contents is the hard part:
+//    1. On insertion of a new node, we need to reuse a deleted index if there
+//       are any.
+//    2. When searching, we can only start from non-deleted indices. If we have
+//       made a huge number of  deletions, simply finding non-deleted indices
+//       could become a slow linear search. Possible mitigation: predetermined,
+//       fixed starting points chosen with a pivot selection algorithm. But we
+//       would need to be careful about bounding the amount of time needed to
+//       update the set of pivots when deletions occur, which may just leave us
+//       back where we started, with the same problem of tracking which indices
+//       still exist.
+//       Another idea: in the basic algorithm, we need a random starting set,
+//       but each query could share the same random starting set... that
+//       suggests that we choose the random starting set once (or infrequently),
+//       then if an element of that set gets deleted, we search for a
+//       replacement. If we assume that element was chosen randomly, certainly
+//       one of its nearest neighbors would be a suitable replacement, right?
+// 4. Edge cases I can think of:
+//    1. An individual node has no neighbors left. Fix: search for new ones on
+//       deletion of its last neighbor.
+//    2. Graph gets broken into multiple components. Mitigation: multiple start
+//       points means by chance one should be in each component, unless some
+//       components are really small. Possible fix: the permutation path idea.
+//       See above.
+//    3. The number of nodes drops to 2, 1, or 0. I don't think 2 is an edge
+//       case, but it might be for some reason. 1 is definitely, because it hits
+//       edge case 1 above -- it will have no neighbors. 0 is a big edge case,
+//       because we need to make searches immediately fail with no results.
 
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
@@ -233,6 +294,9 @@ impl Ord for SearchResult {
     self.dist.total_cmp(&other.dist)
   }
 }
+
+// TODO: return fewer than expected results if num_searchers or k is
+// higher than num_vertices.
 
 /// Perform beam search for the k nearest neighbors of a point q. Returns
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
