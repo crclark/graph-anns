@@ -82,6 +82,11 @@ const DEFAULT_LAMBDA: u8 = 0;
 //       case, but it might be for some reason. 1 is definitely, because it hits
 //       edge case 1 above -- it will have no neighbors. 0 is a big edge case,
 //       because we need to make searches immediately fail with no results.
+// 5. The occlusion stuff needs to be updated based on deletion. This could be
+//    quite difficult, but I think the paper mentions some ideas.
+// 6. We could allow the user to enable deletion after the graph is constructed.
+//    It wouldn't be too hard -- just need to flip a bool and allocate some
+//    memory.
 
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
@@ -606,31 +611,6 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
 // Another idea: store Either TrueDist UpperBoundDist and be lazy -- compute
 // TrueDist only when UpperBoundDist is not precise enough to know whether
 // candidate is closer.
-
-// A parallel implementation of the NN-Descent algorithm from the paper
-// "Efficient K-Nearest Neighbor Graph Construction for Generic Similarity
-// Measures" by Dong et al.
-// https://dl.acm.org/doi/10.1145/1963405.1963487
-//
-// This has some differences from the version presented in the paper:
-// - it is parallelized by splitting the set of vertices into equally-sized
-//   partitions and making each thread responsible for a partition. There are
-//   some small race conditions in this implementation, but they only cause
-//   the algorithm to sometimes see an outdated set of neighbors for a vertex,
-//   which won't impact convergence significantly.
-// - We don't do the "local join" trick described in Section 2.3. There's no
-//   reason why we couldn't, but it's extra code complexity that doesn't yet
-//   seem to be warranted.
-// pub fn nn_descent_parallel<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
-//   num_threads: usize,
-//   k: usize,
-//   db: &C,
-//   // TODO: parametrize the type of the distances so we can use much faster
-//   // i32 if possible.
-//   dist_fn: fn(&T, &T) -> f32,
-// ) -> DenseKNNGraph {
-//   unimplemented!()
-// }
 
 #[cfg(test)]
 mod tests {
