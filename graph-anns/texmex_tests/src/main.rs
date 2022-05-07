@@ -1,6 +1,7 @@
 #![feature(total_cmp)]
 #![feature(is_sorted)]
 extern crate atomic_float;
+extern crate graph_anns;
 extern crate nix;
 extern crate nohash_hasher;
 extern crate parking_lot;
@@ -18,7 +19,6 @@ use std::collections::binary_heap::BinaryHeap;
 use std::thread;
 use std::time::Instant;
 
-mod knn_graph;
 mod texmex;
 
 #[derive(Debug)]
@@ -219,7 +219,7 @@ fn main() {
 
   let rand_init_graph_start = Instant::now();
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let g = knn_graph::random_init(
+  let g = graph_anns::random_init(
     base_vecs.num_rows as u32,
     5,
     &mut prng,
@@ -228,7 +228,7 @@ fn main() {
     2,
   );
   println!(
-    "Initialized knn_graph in {:?}",
+    "Initialized graph_anns in {:?}",
     rand_init_graph_start.elapsed()
   );
 }
