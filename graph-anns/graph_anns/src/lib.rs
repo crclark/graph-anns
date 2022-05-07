@@ -340,8 +340,7 @@ pub fn knn_beam_search<R: RngCore>(
         // We are skipping it here since we did it above.
       }
       Some(f) => {
-        let f_dist = dist_to_q(f.vec_index);
-        if r_dist < f_dist || q_max_heap.len() < k {
+        if r_dist < f.dist || q_max_heap.len() < k {
           q_max_heap.push(SearchResult::new(r, r_dist));
         }
       }
