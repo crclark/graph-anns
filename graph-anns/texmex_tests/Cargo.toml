@@ -1,0 +1,15 @@
+[package]
+name = "texmex_tests"
+version = "0.1.0"
+
+[dependencies]
+graph_anns = { path = "../graph_anns" }
+nix = "0.23.0"
+rand = "0.8.4"
+rand_core = "0.6.3"
+rand_xoshiro = "0.6.0"
+parking_lot = "0.11.2"
+atomic_float = "0.1.0"
+nohash-hasher = "0.2.0"
+rayon = "1.5.1" #TODO: remove?
+tinyset = "0.4.2"

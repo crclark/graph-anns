@@ -1,14 +1,19 @@
+#![feature(total_cmp)]
+#![feature(is_sorted)]
+extern crate nohash_hasher;
+extern crate rand;
+extern crate rand_xoshiro;
+extern crate tinyset;
+
 use nohash_hasher::IntMap;
 use rand::distributions::{Distribution, Uniform};
 use rand::seq::index::sample;
 use rand::RngCore;
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256StarStar;
+use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
 use std::time::Instant;
 use tinyset::SetU32;
-use Ordering;
 
 const DEFAULT_LAMBDA: u8 = 0;
 
@@ -269,7 +274,7 @@ impl DenseKNNGraph {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SearchResult {
+pub struct SearchResult {
   pub vec_index: u32,
   pub dist: f32,
 }
@@ -307,7 +312,7 @@ impl Ord for SearchResult {
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
 /// This is a translation of the pseudocode of algorithm 1 from
 /// Approximate k-NN Graph Construction: A Generic Online Approach
-fn knn_beam_search<R: RngCore>(
+pub fn knn_beam_search<R: RngCore>(
   g: &DenseKNNGraph,
   dist_to_q: impl Fn(u32) -> f32,
   num_searchers: usize,
@@ -380,7 +385,7 @@ fn knn_beam_search<R: RngCore>(
 /// Constructs an exact k-nn graph on the first n items in db. O(n^2).
 /// `capacity` is max capacity of the returned graph (for future inserts).
 /// Must be >= n.
-fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
+pub fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   n: u32,
   capacity: u32,
   k: u32,
@@ -448,7 +453,7 @@ fn apply_lgd(
 ///
 /// This is equivalent to one iteration of Algorithm 3 in
 /// "Approximate k-NN Graph Construction: A Generic Online Approach".
-fn insert_approx<R: RngCore>(
+pub fn insert_approx<R: RngCore>(
   g: &mut DenseKNNGraph,
   q: u32,
   dist_to_q: impl Fn(u32) -> f32,
