@@ -509,6 +509,7 @@ fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
 /// Examples:
 ///
 /// ```
+/// use graph_anns::chunk_range;
 /// assert_eq!(chunk_range(10, 2, 0), (0,5));
 /// ```
 pub fn chunk_range(num_vertices: u32, num_partitions: usize, i: u32) -> (u32, u32) {
@@ -620,7 +621,43 @@ pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>
 #[cfg(test)]
 mod tests {
   use super::*;
-  use texmex::sq_euclidean_faster;
+  use rand::SeedableRng;
+  use rand_xoshiro::Xoshiro256StarStar;
+
+  // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
+  // PrimitiveToF32 mess is necessary. .into() is much slower.
+
+  pub trait PrimitiveToF32 {
+    fn tof32(self) -> f32;
+  }
+
+  impl PrimitiveToF32 for u8 {
+    fn tof32(self) -> f32 {
+      self as f32
+    }
+  }
+
+  impl PrimitiveToF32 for i32 {
+    fn tof32(self) -> f32 {
+      self as f32
+    }
+  }
+
+  impl PrimitiveToF32 for f32 {
+    fn tof32(self) -> f32 {
+      self
+    }
+  }
+
+  pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(v1: &[T], v2: &[T]) -> f32 {
+    let mut result = 0.0;
+    let n = v1.len();
+    for i in 0..n {
+      let diff = v2[i].tof32() - v1[i].tof32();
+      result += diff * diff;
+    }
+    result
+  }
 
   #[test]
   fn test_chunk_range() {
