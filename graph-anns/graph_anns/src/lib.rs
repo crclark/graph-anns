@@ -305,6 +305,12 @@ impl Ord for SearchResult {
   }
 }
 
+pub struct SearchResults {
+  pub nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult>,
+  pub visited_nodes: SetU32,
+  pub visited_node_distances_to_q: IntMap<u32, f32>,
+}
+
 // TODO: return fewer than expected results if num_searchers or k is
 // higher than num_vertices.
 
@@ -318,7 +324,7 @@ pub fn knn_beam_search<R: RngCore>(
   num_searchers: usize,
   k: usize,
   prng: &mut R,
-) -> (BinaryHeap<SearchResult>, SetU32, IntMap<u32, f32>) {
+) -> SearchResults {
   assert!(num_searchers <= g.num_vertices as usize);
   assert!(k <= g.num_vertices as usize);
   let mut q_max_heap: BinaryHeap<SearchResult> = BinaryHeap::new();
@@ -378,7 +384,11 @@ pub fn knn_beam_search<R: RngCore>(
     }
   }
 
-  (q_max_heap, visited, visited_distances)
+  SearchResults {
+    nearest_neighbors_max_dist_heap: q_max_heap,
+    visited_nodes: visited,
+    visited_node_distances_to_q: visited_distances,
+  }
 }
 
 /// Constructs an exact k-nn graph on the first n items in db. O(n^2).
@@ -460,15 +470,18 @@ pub fn insert_approx<R: RngCore>(
   prng: &mut R,
 ) -> () {
   //TODO: return the index of the new data point
-  let (nearest_neighbors_max_dist_heap, visited_nodes, visited_nodes_distance_to_q) =
-    knn_beam_search(g, dist_to_q, num_searchers, g.out_degree as usize, prng);
+  let SearchResults {
+    nearest_neighbors_max_dist_heap,
+    visited_nodes,
+    visited_node_distances_to_q,
+  } = knn_beam_search(g, dist_to_q, num_searchers, g.out_degree as usize, prng);
 
   if g.use_rrnp {
     rrnp(
       g,
       &nearest_neighbors_max_dist_heap,
       &visited_nodes,
-      &visited_nodes_distance_to_q,
+      &visited_node_distances_to_q,
     );
   } else {
     let (neighbors, dists) = nearest_neighbors_max_dist_heap
@@ -479,7 +492,7 @@ pub fn insert_approx<R: RngCore>(
 
     //TODO: try to avoid clone
     for r in visited_nodes.clone() {
-      g.insert_edge_if_closer(r, q, visited_nodes_distance_to_q[&r]);
+      g.insert_edge_if_closer(r, q, visited_node_distances_to_q[&r]);
     }
   }
 
@@ -488,7 +501,7 @@ pub fn insert_approx<R: RngCore>(
       g,
       &nearest_neighbors_max_dist_heap,
       &visited_nodes,
-      &visited_nodes_distance_to_q,
+      &visited_node_distances_to_q,
     );
   }
 }
@@ -725,7 +738,11 @@ mod tests {
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let q = [1.2f32];
-    let (nearest, _, _) = knn_beam_search(
+    let SearchResults {
+      nearest_neighbors_max_dist_heap,
+      visited_nodes,
+      visited_node_distances_to_q,
+    } = knn_beam_search(
       &g,
       |i| sq_euclidean_faster(&db[i as usize], &q),
       1,
@@ -733,7 +750,10 @@ mod tests {
       &mut prng,
     );
     assert_eq!(
-      nearest.iter().map(|x| x.vec_index).collect::<Vec<u32>>(),
+      nearest_neighbors_max_dist_heap
+        .iter()
+        .map(|x| x.vec_index)
+        .collect::<Vec<u32>>(),
       vec![1u32, 0]
     );
   }
