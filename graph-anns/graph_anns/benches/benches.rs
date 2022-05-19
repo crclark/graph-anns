@@ -96,13 +96,7 @@ fn bench_construct_graph_approx_iterative(c: &mut Criterion) {
   let mut group = c.benchmark_group("construct_graph_approx_iterative");
   group.measurement_time(Duration::from_secs(60));
 
-  for n in [
-    500, 1000,
-    // 10000,
-    // 1000_000
-  ]
-  .iter()
-  {
+  for n in [500, 1000, 10000, 1000_000].iter() {
     group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
       b.iter(|| construct_graph_approx_iterative(n))
     });

@@ -12,6 +12,7 @@ use rand::RngCore;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
+use std::collections::HashSet;
 use std::time::Instant;
 use tinyset::SetU32;
 
@@ -305,7 +306,7 @@ impl Ord for SearchResult {
 
 pub struct SearchResults {
   pub nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult>,
-  pub visited_nodes: SetU32,
+  pub visited_nodes: HashSet<u32>,
   pub visited_node_distances_to_q: IntMap<u32, f32>,
 }
 
@@ -314,6 +315,9 @@ pub struct SearchResults {
 
 // TODO: tests for graph where n is not divisible by k, where n is very small,
 // etc.
+
+// TODO: add summary statistics to SearchResults? min, max, mean distance of
+// visited nodes. Or just compute them in a more complex benchmark program.
 
 /// Perform beam search for the k nearest neighbors of a point q. Returns
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
@@ -330,7 +334,7 @@ pub fn knn_beam_search<R: RngCore>(
   assert!(k <= g.num_vertices as usize);
   let mut q_max_heap: BinaryHeap<SearchResult> = BinaryHeap::new();
   let mut r_min_heap: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
-  let mut visited = SetU32::new();
+  let mut visited = HashSet::<u32>::new();
   let mut visited_distances: IntMap<u32, f32> = IntMap::default();
 
   // lines 2 to 10 of the pseudocode
@@ -372,7 +376,7 @@ pub fn knn_beam_search<R: RngCore>(
     }
 
     for e in r_nbrs.iter() {
-      if !visited.contains(e) {
+      if !visited.contains(&e) {
         visited.insert(e);
         let e_dist = dist_to_q(e);
         let f_dist = dist_to_q(f.vec_index);
@@ -440,7 +444,7 @@ pub fn exhaustive_knn_graph(
 fn rrnp(
   _g: &mut DenseKNNGraph,
   _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
-  _visited_nodes: &SetU32,
+  _visited_nodes: &HashSet<u32>,
   _visited_nodes_distance_to_q: &IntMap<u32, f32>,
 ) -> () {
   unimplemented!()
@@ -449,7 +453,7 @@ fn rrnp(
 fn apply_lgd(
   _g: &mut DenseKNNGraph,
   _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
-  _visited_nodes: &SetU32,
+  _visited_nodes: &HashSet<u32>,
   _visited_nodes_distance_to_q: &IntMap<u32, f32>,
 ) -> () {
   unimplemented!()
