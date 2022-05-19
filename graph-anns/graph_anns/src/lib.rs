@@ -21,10 +21,6 @@ const DEFAULT_LAMBDA: u8 = 0;
 
 // TODO: many benchmarking utilities. Recall@n  metrics and so forth.
 
-// TODO: benchmark with random data that has lazily-generated distances/vectors.
-// We could use random integers and the bitwise hamming distance between them
-// for speed.
-
 // TODO: I see two possible problems in the paper:
 // 1. Nothing in the paper guarantees the connectivity of the graph.
 // 2. Intuitively, it seems like being able to jump long distances if we are in
@@ -209,6 +205,8 @@ impl DenseKNNGraph {
     return false;
   }
 
+  // TODO: can we run k-nn descent on the graph whenever we have free cycles?
+
   /// Insert a new vertex into the graph, given its k neighbors and their
   /// distances. Panics if the graph is already full (num_vertices == capacity).
   /// nbrs and dists must be equal to the out_degree of the graph.
@@ -219,7 +217,6 @@ impl DenseKNNGraph {
     assert!(nbrs.len() == od && dists.len() == od);
 
     for (nbr, dist) in nbrs.iter().zip(dists) {
-      println!("Connecting {} to {}", u, nbr);
       self.edges.push((*nbr, dist, DEFAULT_LAMBDA));
       let s = &mut self.backpointers[*nbr as usize];
       s.insert(u);
@@ -241,7 +238,8 @@ impl DenseKNNGraph {
 
   /// Panics if graph is internally inconsistent.
   fn consistency_check(&self) {
-    if self.edges.len() != self.num_vertices as usize * self.out_degree as usize {
+    if self.edges.len() != self.num_vertices as usize * self.out_degree as usize
+    {
       panic!(
         "edges.len() is not equal to num_vertices * out_degree. {} != {} * {}",
         self.edges.len(),
@@ -313,6 +311,9 @@ pub struct SearchResults {
 
 // TODO: return fewer than expected results if num_searchers or k is
 // higher than num_vertices.
+
+// TODO: tests for graph where n is not divisible by k, where n is very small,
+// etc.
 
 /// Perform beam search for the k nearest neighbors of a point q. Returns
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
@@ -394,12 +395,11 @@ pub fn knn_beam_search<R: RngCore>(
 /// Constructs an exact k-nn graph on the first n items in db. O(n^2).
 /// `capacity` is max capacity of the returned graph (for future inserts).
 /// Must be >= n.
-pub fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
+pub fn exhaustive_knn_graph(
   n: u32,
   capacity: u32,
   k: u32,
-  db: &C,
-  dist_fn: fn(&T, &T) -> f32,
+  dist_fn: &Fn(u32, u32) -> f32,
 ) -> DenseKNNGraph {
   if k >= n {
     panic!("k must be less than n");
@@ -413,7 +413,7 @@ pub fn exhaustive_knn_graph<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
       if i == j {
         continue;
       }
-      let dist = get_dist(i, j, db, dist_fn);
+      let dist = dist_fn(i, j);
       knn.push(SearchResult::new(j, dist));
 
       while knn.len() > k as usize {
@@ -508,127 +508,48 @@ pub fn insert_approx<R: RngCore>(
 
 // TODO: wrap db and dist_fn in a struct and make this a method on it.
 // TODO: avoid passing db at all? We need to support incremental data.
-fn get_dist<T: ?Sized, C: std::ops::Index<usize, Output = T>>(
-  i: u32,
-  j: u32,
-  db: &C,
-  dist_fn: fn(&T, &T) -> f32,
-) -> f32 {
-  dist_fn(&db[i as usize], &db[j as usize])
-}
-
-/// Computes a sliding window of num_vertices/num_partitions vertices around i.
-/// Examples:
-///
-/// ```
-/// use graph_anns::chunk_range;
-/// assert_eq!(chunk_range(10, 2, 0), (0,5));
-/// ```
-pub fn chunk_range(num_vertices: u32, num_partitions: usize, i: u32) -> (u32, u32) {
-  let w = num_vertices / (num_partitions as u32);
-  let r = w / 2;
-  let rem = w % 2;
-
-  if i < r {
-    (0, w)
-  } else if i > num_vertices - r {
-    (num_vertices - w, num_vertices)
-  } else if i > r + rem {
-    (i - r - rem, i + r)
-  } else {
-    (i - r, i + r + rem)
-  }
-}
-
-// TODO: not pub
-/// Randomly initializes a K-NN Graph. This graph can then be optimized with
-/// nn-descent.
-pub fn random_init<R: RngCore, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
-  num_vertices: u32,
-  out_degree: u32,
-  prng: &mut R,
-  db: &C,
-  dist_fn: fn(&T, &T) -> f32,
-  // An optimization for large datasets to speed up initialization, probably at
-  // the expense of slower convergence. The dataset is split into num_partitions
-  // chunks, and nodes in each chunk will only be connected to other nodes in
-  // the same chunk. This improves cache locality -- only 1/num_partitions of
-  // the dataset will need to be in active use at any time during initialization.
-  num_partitions: usize,
-) -> DenseKNNGraph {
-  if num_vertices == u32::max_value() {
-    panic!("Max number of vertices is u32::max_value() - 1")
-  }
-
-  let start = Instant::now();
-
-  let mut g = DenseKNNGraph::empty(num_vertices, out_degree);
-
-  println!(
-    "Allocated vecs and created mutexes in {:?}",
-    start.elapsed()
-  );
-
-  let start_loop = Instant::now();
-  for u in 0..num_vertices {
-    let (ix_range_low, ix_range_high) = chunk_range(num_vertices, num_partitions, u);
-    let rand_vertex = Uniform::from(ix_range_low..ix_range_high);
-
-    for _ in 0..out_degree {
-      let v = rand_vertex.sample(prng);
-      let distance = get_dist(u, v, db, dist_fn);
-      g.edges.push((v, distance, DEFAULT_LAMBDA));
-      let s = &mut g.backpointers[v as usize];
-      s.insert(u);
-    }
-
-    if u % 1000_000 == 0 {
-      println!("finished u = {:?}, elapsed = {:?}", u, start_loop.elapsed());
-    }
-  }
-  g
-}
-
-// Performs the NN-descent algorithm on a subset of the vertices of the graph.
-// Early stopping occurs when the number of successful updates in an iteration
-// is less than `delta*k*(j-i)`.
-// fn nn_descent_thread<R: RngCore>(
-//   // Lower bound (inclusive) node that this thread is responsible for
-//   i: u32,
-//   // Upper bound (exclusive) node that this thread is responsible for
-//   j: u32,
-//   // Early stopping parameter. Suggested default from the paper: 0.001.
-//   delta: f64,
-//   g: Arc<DenseKNNGraph>,
-//   prng: R,
-// ) -> () {
-//   unimplemented!()
-// }
-
-// TODO: use the triangle inequality to short-circuit the comparisons. Say we have
-// a -> b -> c and we are working on a. We have already stored d(a,b) and d(b,c).
-// If d(a,b) + d(b,c) is less than another neighbor of a, x, we can replace x
-// with c without ever needing to compute d(a,c)...
-// Oops, except we need to record d(a,c) in the list of a's neighbors so that we
-// can do future iterations... hmm. Or do we? Is storing an upper bound on the
-// distance enough? If we only know upper_bound_dist(a,b) and upper_bound_dist(b,c),
-// we can say that we have an upper bound on d(a,c) by adding them, but it could
-// be a rather bad upper bound. And our upper bounds would be getting looser
-// each iteration, as we keep adding upper bounds together again and again.
-// OTOH, if we only computed d(a,c) if the upper bound on its distance is less
-// than a known distance, we would still be winning...
-// ..
-// To summarize:
-// Use d(a,b) + d(b,c) as an approximation of d(a,c). If approx_d(a,c) < d(a,x) for
-// some x, replace x with c and compute d(a,c). If approx_d(a,c) > d(a,x) for
-// all x, compute d(a,c) and iterate again. That's a dumb strategy, because
-// either way, you are computing d(a,c). The only difference is that you now
-// have a worst case where you do 2*k iterations through the list of a's
-// neighbors. That's bad.
+// TODO: really need a solution here. The std::ops::Index thing doesn't work
+// because it forces the user to return references to objects, which the
+// user may not have (what if the objects are ephemeral and the user wants to
+// avoid allocating them? What if you can compute distance as the object is
+// streamed over the network, so you never materialize the whole thing in
+// memory?) Requirements:
+// - Don't require the objects to be stored in memory. The user decides how to
+// fetch them to compute distance on them. Read from disk, network call, memory,
+// whatever the user wants.
+// - Don't force user to make a mapping from 0..n to the objects. The user's
+// objects might be identified by UUIDs, strings, whatever, on the user's side.
+// However, for memory efficiency, allow user to opt into using u32 ids.
+// - TODO: Make sure that this all works with deletion! Before deletion, we were
+//   assuming that our internal u32 ids pointed to the same object forever.
+//   Now we are assuming it could change, so if we pass the internal id to the
+//   user's callback, the user needs to make sure that they can handle it. BUT
+//   the catch is that *our code* will be assigning the internal id to the
+//   user's object. So we need to return the assigned id to the user, and the
+//   user needs to keep track of the internal id -> object mapping on their
+//   side. This is really tricky for the user and a potential footgun, so we
+//   desperately need to expose a utility that handles this for the user.
+//   TODO: make sure that the API's use of internal ids makes sense given
+//   deletion. Some parts assume the user is assigning internal ids, other parts
+//   assume the library is. This is very very bad.
 //
-// Another idea: store Either TrueDist UpperBoundDist and be lazy -- compute
-// TrueDist only when UpperBoundDist is not precise enough to know whether
-// candidate is closer.
+// Maybe the right solution is to generalize the graph type itself instead of
+// being hardcoded to u32s.
+//
+// Possible solution:
+// - Create an "easy mode" wrapper around DenseKNNGraph that allows the user to
+// insert any type they want, and we maintain the mapping from that type to u32.
+// As with any container, whether the user stores IDs or objects themselves is
+// none of our business as the implementor of the container. We can defer this
+// one until later with no problems.
+// - Eliminate the db type. If the user needs to carry around more info, their
+// distance fn can be a closure. "Easy mode" wrapper would have the user create
+// a distance function that takes their type as input, we do the mapping to/from
+// u32 behind-the-scenes.
+// - For exhaustive_knn_graph, the contract is that dist_fn will be called with
+// indices 0..n so dist_fn must be able to give answers over that range. Again,
+// an easy mode wrapper can hide this from the user by mapping their stuff to
+// 0..n.
 
 #[cfg(test)]
 mod tests {
@@ -661,7 +582,10 @@ mod tests {
     }
   }
 
-  pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(v1: &[T], v2: &[T]) -> f32 {
+  pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(
+    v1: &[T],
+    v2: &[T],
+  ) -> f32 {
     let mut result = 0.0;
     let n = v1.len();
     for i in 0..n {
@@ -672,56 +596,11 @@ mod tests {
   }
 
   #[test]
-  fn test_chunk_range() {
-    assert_eq!(chunk_range(10, 2, 0), (0, 5));
-    assert_eq!(chunk_range(10, 2, 1), (0, 5));
-    assert_eq!(chunk_range(10, 2, 2), (0, 5));
-    assert_eq!(chunk_range(10, 2, 3), (1, 6));
-    assert_eq!(chunk_range(10, 2, 4), (1, 6));
-    assert_eq!(chunk_range(10, 2, 5), (2, 7));
-    assert_eq!(chunk_range(10, 2, 6), (3, 8));
-    assert_eq!(chunk_range(10, 2, 7), (4, 9));
-    assert_eq!(chunk_range(10, 2, 8), (5, 10));
-    assert_eq!(chunk_range(10, 2, 9), (5, 10));
-
-    assert_eq!(chunk_range(11, 2, 0), (0, 5));
-    assert_eq!(chunk_range(11, 2, 1), (0, 5));
-    assert_eq!(chunk_range(11, 2, 2), (0, 5));
-    assert_eq!(chunk_range(11, 2, 3), (1, 6));
-    assert_eq!(chunk_range(11, 2, 4), (1, 6));
-    assert_eq!(chunk_range(11, 2, 5), (2, 7));
-    assert_eq!(chunk_range(11, 2, 6), (3, 8));
-    assert_eq!(chunk_range(11, 2, 7), (4, 9));
-    assert_eq!(chunk_range(11, 2, 8), (5, 10));
-    assert_eq!(chunk_range(11, 2, 9), (6, 11));
-
-    assert_eq!(chunk_range(10, 3, 0), (0, 3));
-    assert_eq!(chunk_range(10, 3, 1), (0, 3));
-    assert_eq!(chunk_range(10, 3, 2), (1, 4));
-    assert_eq!(chunk_range(10, 3, 3), (1, 4));
-    assert_eq!(chunk_range(10, 3, 4), (2, 5));
-    assert_eq!(chunk_range(10, 3, 5), (3, 6));
-    assert_eq!(chunk_range(10, 3, 6), (4, 7));
-    assert_eq!(chunk_range(10, 3, 7), (5, 8));
-    assert_eq!(chunk_range(10, 3, 8), (6, 9));
-    assert_eq!(chunk_range(10, 3, 9), (7, 10));
-
-    assert_eq!(chunk_range(10, 1, 0), (0, 10));
-    assert_eq!(chunk_range(10, 1, 1), (0, 10));
-    assert_eq!(chunk_range(10, 1, 2), (0, 10));
-    assert_eq!(chunk_range(10, 1, 3), (0, 10));
-    assert_eq!(chunk_range(10, 1, 4), (0, 10));
-    assert_eq!(chunk_range(10, 1, 5), (0, 10));
-    assert_eq!(chunk_range(10, 1, 6), (0, 10));
-    assert_eq!(chunk_range(10, 1, 7), (0, 10));
-    assert_eq!(chunk_range(10, 1, 8), (0, 10));
-    assert_eq!(chunk_range(10, 1, 9), (0, 10));
-  }
-
-  #[test]
   fn test_exhaustive_knn_graph() {
     let db = vec![[1], [2], [3], [10], [11], [12]];
-    let g = exhaustive_knn_graph(6, 10, 2, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let g = exhaustive_knn_graph(6, 10, 2, &|x, y| {
+      sq_euclidean_faster(&db[x as usize], &db[y as usize])
+    });
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
     assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
@@ -734,7 +613,9 @@ mod tests {
   #[test]
   fn test_beam_search_fully_connected_graph() {
     let db = vec![[1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
-    let g = exhaustive_knn_graph(6, 10, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let g = exhaustive_knn_graph(6, 10, 5, &|x, y| {
+      sq_euclidean_faster(&db[x as usize], &db[y as usize])
+    });
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let q = [1.2f32];
@@ -818,7 +699,9 @@ mod tests {
       [21f32],
       [22f32],
     ];
-    let mut g = exhaustive_knn_graph(6, 11, 5, &db, |&x, &y| sq_euclidean_faster(&x, &y));
+    let mut g = exhaustive_knn_graph(6, 11, 5, &|x, y| {
+      sq_euclidean_faster(&db[x as usize], &db[y as usize])
+    });
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
       insert_approx(
