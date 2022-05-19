@@ -219,18 +219,7 @@ fn main() {
 
   let rand_init_graph_start = Instant::now();
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let g = graph_anns::random_init(
-    base_vecs.num_rows as u32,
-    5,
-    &mut prng,
-    &base_vecs,
-    texmex::sq_euclidean_faster,
-    2,
-  );
-  println!(
-    "Initialized graph_anns in {:?}",
-    rand_init_graph_start.elapsed()
-  );
+  println!("TODO: fix this");
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.
