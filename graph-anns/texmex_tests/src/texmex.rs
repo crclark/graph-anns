@@ -87,7 +87,10 @@ impl PrimitiveToF32 for f32 {
   }
 }
 
-pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(v1: &[T], v2: &[T]) -> f32 {
+pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(
+  v1: &[T],
+  v2: &[T],
+) -> f32 {
   let mut result = 0.0;
   let n = v1.len();
   for i in 0..n {

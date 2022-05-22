@@ -1,9 +1,7 @@
 extern crate criterion;
 use std::time::Duration;
 
-use criterion::{
-  black_box, criterion_group, criterion_main, Bencher, Criterion,
-};
+use criterion::{criterion_group, criterion_main, Criterion};
 use criterion::{BatchSize, BenchmarkId};
 
 extern crate graph_anns;
@@ -13,22 +11,6 @@ use graph_anns::*;
 use rand_core::RngCore;
 use rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
-
-fn fibonacci(n: u64) -> u64 {
-  match n {
-    0 => 1,
-    1 => 1,
-    n => fibonacci(n - 1) + fibonacci(n - 2),
-  }
-}
-
-fn criterion_benchmark(c: &mut Criterion) {
-  c.bench_function("fib 20", |b| b.iter(|| fibonacci(black_box(20))));
-}
-
-fn criterion_benchmark2(c: &mut Criterion) {
-  c.bench_function("fib 21", |b| b.iter(|| fibonacci(black_box(21))));
-}
 
 /// Hamming distance between two random 640-bit vectors which are uniquely
 /// identified by x and y.
