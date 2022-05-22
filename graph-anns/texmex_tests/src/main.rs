@@ -71,8 +71,9 @@ fn _search_range<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   for i in lower_bound_incl..upper_bound_excl {
     for q in 0..query_set_size {
       let dist = dist_fn(&db[i], &query_set[q]);
-      let heap: &mut BinaryHeap<SearchResult> = nearest_neighbors.get_mut(q).unwrap();
-      heap.push(SearchResult::new(i, dist));
+      let heap: &mut BinaryHeap<SearchResult> =
+        nearest_neighbors.get_mut(q).unwrap();
+      heap.push(SearchResult { vec_index: i, dist });
       while heap.len() > k {
         heap.pop().unwrap();
       }
@@ -81,7 +82,9 @@ fn _search_range<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   nearest_neighbors
 }
 
-fn _search_identity_elem(query_set_size: usize) -> Vec<BinaryHeap<SearchResult>> {
+fn _search_identity_elem(
+  query_set_size: usize,
+) -> Vec<BinaryHeap<SearchResult>> {
   let mut nearest_neighbors = Vec::new();
   for _ in 0..query_set_size {
     nearest_neighbors.push(BinaryHeap::new());
@@ -114,7 +117,8 @@ fn _search_inject<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
 ) -> Vec<BinaryHeap<SearchResult>> {
   for q in 0..query_set_size {
     let dist = dist_fn(&db[i], &query_set[q]);
-    let heap: &mut BinaryHeap<SearchResult> = nearest_neighbors.get_mut(q).unwrap();
+    let heap: &mut BinaryHeap<SearchResult> =
+      nearest_neighbors.get_mut(q).unwrap();
     heap.push(SearchResult::new(i, dist));
     while heap.len() > k {
       heap.pop().unwrap();
@@ -123,7 +127,11 @@ fn _search_inject<'a, T: ?Sized, C: std::ops::Index<usize, Output = T>>(
   nearest_neighbors
 }
 
-fn _search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
+fn _search_rayon<
+  'a,
+  T: ?Sized,
+  C: std::ops::Index<usize, Output = T> + Sync,
+>(
   query_set: &C,
   query_set_size: usize,
   db: &C,
@@ -145,7 +153,9 @@ fn _search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
     )
     .reduce(
       || _search_identity_elem(query_set_size),
-      |v1: Vec<BinaryHeap<SearchResult>>, v2: Vec<BinaryHeap<SearchResult>>| _search_sum(k, v1, v2),
+      |v1: Vec<BinaryHeap<SearchResult>>, v2: Vec<BinaryHeap<SearchResult>>| {
+        _search_sum(k, v1, v2)
+      },
     );
 
   nearest_neighbors
@@ -153,9 +163,14 @@ fn _search_rayon<'a, T: ?Sized, C: std::ops::Index<usize, Output = T> + Sync>(
 
 fn _main_old() {
   let start = Instant::now();
-  let base_vecs = texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128).unwrap();
-  let query_vecs =
-    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_query.bvecs_array_one_point", 128).unwrap();
+  let base_vecs =
+    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
+      .unwrap();
+  let query_vecs = texmex::Vecs::<u8>::new(
+    "/mnt/970pro/anns/bigann_query.bvecs_array_one_point",
+    128,
+  )
+  .unwrap();
   println!("Loaded dataset in {:?}", start.elapsed());
 
   let mut handles = Vec::new();
@@ -197,9 +212,14 @@ fn _main_old() {
 // version using rayon
 fn _main_rayon() {
   let start = Instant::now();
-  let base_vecs = texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128).unwrap();
-  let query_vecs =
-    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_query.bvecs_array_one_point", 128).unwrap();
+  let base_vecs =
+    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
+      .unwrap();
+  let query_vecs = texmex::Vecs::<u8>::new(
+    "/mnt/970pro/anns/bigann_query.bvecs_array_one_point",
+    128,
+  )
+  .unwrap();
   println!("Loaded dataset in {:?}", start.elapsed());
 
   _search_rayon(
@@ -214,7 +234,9 @@ fn _main_rayon() {
 
 fn main() {
   let mmap_start = Instant::now();
-  let base_vecs = texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128).unwrap();
+  let base_vecs =
+    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
+      .unwrap();
   println!("mmaped dataset in {:?}", mmap_start.elapsed());
 
   let rand_init_graph_start = Instant::now();

@@ -6,14 +6,12 @@ extern crate rand_xoshiro;
 extern crate tinyset;
 
 use nohash_hasher::IntMap;
-use rand::distributions::{Distribution, Uniform};
 use rand::seq::index::sample;
 use rand::RngCore;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
 use std::collections::HashSet;
-use std::time::Instant;
 use tinyset::SetU32;
 
 const DEFAULT_LAMBDA: u8 = 0;
@@ -44,7 +42,12 @@ const DEFAULT_LAMBDA: u8 = 0;
 // 1. Backpointers. We need to update an unbounded number of referrers to the
 //    deleted node.
 // 2. Edges. Once we have the referrers, we need to delete one of their edges
-//    that point to the deleted node.
+//    that point to the deleted node. We can either replace it with a new edge,
+//    or allow the number of edges to drop below the configured out_degree.
+//    I am leaning toward replacement. We can use the set of neighbors of the
+//    deleted node as candidates for replacement.
+//    However, if we do want to allow the set of out-edges to shrink, we have
+//    some options.
 //    Because we're storing adjacency in a flat Vec, this requires us to
 //    1. Either wrap each element in `Option` or store the length of the edges
 //       subvector for each node (moving invalid items to the end). I am
@@ -90,18 +93,51 @@ const DEFAULT_LAMBDA: u8 = 0;
 //    It wouldn't be too hard -- just need to flip a bool and allocate some
 //    memory.
 
+#[derive(Debug)]
+pub struct KNNGraphConfig {
+  /// The max number of vertices that can be inserted into the graph. Constant.
+  pub capacity: u32,
+  /// The number of approximate nearest neighbors to store for each inserted
+  /// element. This is a constant.
+  pub out_degree: u32,
+  /// Whether to use restricted recursive neighborhood propagation. This improves
+  /// search speed, but decreases insertion throughput. TODO: verify that's
+  /// true.
+  pub use_rrnp: bool,
+  /// Whether to use lazy graph diversification. This improves search speed.
+  /// TODO: parametrize this type so that the LGD vector is never allocated/
+  /// takes no memory if this is set to false.
+  pub use_lgd: bool,
+}
+
+// NOTE: can't do a Default because we can't guess a reasonable capacity.
+// TODO: auto-resize like a Vec?
+
+impl KNNGraphConfig {
+  /// Create a new KNNGraphConfig.
+  pub fn new(
+    capacity: u32,
+    out_degree: u32,
+    use_rrnp: bool,
+    use_lgd: bool,
+  ) -> KNNGraphConfig {
+    KNNGraphConfig {
+      capacity,
+      out_degree,
+      use_rrnp,
+      use_lgd,
+    }
+  }
+}
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
 #[derive(Debug)]
 pub struct DenseKNNGraph {
-  /// n, the number of vertices in the graph. The valid indices of the graph
-  /// are 0 to n-1.
+  /// n, the current number of vertices in the graph. The valid indices of the
+  /// graph are 0 to n-1.
   pub num_vertices: u32,
-  /// The max number of vertices that can be inserted into the graph. Constant.
-  pub capacity: u32,
-  /// The number of neighbors of each vertex. This is a constant.
-  pub out_degree: u32,
   /// The underlying buffer of num_vertices*out_degree neighbor information.
   /// An adjacency list of (node id, distance, lambda crowding factor
   /// (not yet implemented, always zero)).
@@ -114,14 +150,7 @@ pub struct DenseKNNGraph {
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
   pub backpointers: Vec<SetU32>,
-  /// Whether to use restricted recursive neighborhood propagation. This improves
-  /// search speed, but decreases insertion throughput. TODO: verify that's
-  /// true.
-  use_rrnp: bool,
-  /// Whether to use lazy graph diversification. This improves search speed.
-  /// TODO: parametrize this type so that the LGD vector is never allocated/
-  /// takes no memory if this is set to false.
-  use_lgd: bool,
+  pub config: KNNGraphConfig,
 }
 
 impl DenseKNNGraph {
@@ -142,14 +171,13 @@ impl DenseKNNGraph {
     let use_rrnp = false;
     let use_lgd = false;
 
+    let config = KNNGraphConfig::new(capacity, out_degree, use_rrnp, use_lgd);
+
     DenseKNNGraph {
       num_vertices,
-      capacity,
-      out_degree,
       edges,
       backpointers,
-      use_rrnp,
-      use_lgd,
+      config,
     }
   }
 
@@ -158,8 +186,8 @@ impl DenseKNNGraph {
   pub fn get_edges(&self, index: u32) -> &[(u32, f32, u8)] {
     assert!(index < self.num_vertices);
 
-    let i = index * self.out_degree;
-    let j = i + self.out_degree;
+    let i = index * self.config.out_degree;
+    let j = i + self.config.out_degree;
     &self.edges[i as usize..j as usize]
   }
 
@@ -171,8 +199,8 @@ impl DenseKNNGraph {
   fn get_edges_mut(&mut self, index: u32) -> &mut [(u32, f32, u8)] {
     assert!(index < self.num_vertices);
 
-    let i = index * self.out_degree;
-    let j = i + self.out_degree;
+    let i = index * self.config.out_degree;
+    let j = i + self.config.out_degree;
     &mut self.edges[i as usize..j as usize]
   }
 
@@ -189,7 +217,7 @@ impl DenseKNNGraph {
   ///
   /// Returns `true` if the new edge was added.
   fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
-    let most_distant_ix = (self.out_degree - 1) as usize;
+    let most_distant_ix = (self.config.out_degree - 1) as usize;
     let edges = self.get_edges_mut(from);
 
     if dist < edges[most_distant_ix].1 {
@@ -212,9 +240,10 @@ impl DenseKNNGraph {
   /// distances. Panics if the graph is already full (num_vertices == capacity).
   /// nbrs and dists must be equal to the out_degree of the graph.
   fn insert_vertex(&mut self, u: u32, nbrs: Vec<u32>, dists: Vec<f32>) {
-    assert!(self.num_vertices < self.capacity);
+    //TODO: replace all asserts with Either return values
+    assert!(self.num_vertices < self.config.capacity);
 
-    let od = self.out_degree as usize;
+    let od = self.config.out_degree as usize;
     assert!(nbrs.len() == od && dists.len() == od);
 
     for (nbr, dist) in nbrs.iter().zip(dists) {
@@ -239,13 +268,14 @@ impl DenseKNNGraph {
 
   /// Panics if graph is internally inconsistent.
   fn consistency_check(&self) {
-    if self.edges.len() != self.num_vertices as usize * self.out_degree as usize
+    if self.edges.len()
+      != self.num_vertices as usize * self.config.out_degree as usize
     {
       panic!(
         "edges.len() is not equal to num_vertices * out_degree. {} != {} * {}",
         self.edges.len(),
         self.num_vertices,
-        self.out_degree
+        self.config.out_degree
       );
     }
 
@@ -403,8 +433,9 @@ pub fn exhaustive_knn_graph(
   n: u32,
   capacity: u32,
   k: u32,
-  dist_fn: &Fn(u32, u32) -> f32,
+  dist_fn: &dyn Fn(u32, u32) -> f32,
 ) -> DenseKNNGraph {
+  // TODO: return Either
   if k >= n {
     panic!("k must be less than n");
   }
@@ -459,6 +490,8 @@ fn apply_lgd(
   unimplemented!()
 }
 
+// TODO: just rename insert_approx to insert?
+
 /// Inserts a new data point into the graph. The graph must not be full.
 /// Optionally performs restricted recursive neighborhood propagation and
 /// lazy graph diversification. These options are set when the graph is
@@ -478,9 +511,15 @@ pub fn insert_approx<R: RngCore>(
     nearest_neighbors_max_dist_heap,
     visited_nodes,
     visited_node_distances_to_q,
-  } = knn_beam_search(g, dist_to_q, num_searchers, g.out_degree as usize, prng);
+  } = knn_beam_search(
+    g,
+    dist_to_q,
+    num_searchers,
+    g.config.out_degree as usize,
+    prng,
+  );
 
-  if g.use_rrnp {
+  if g.config.use_rrnp {
     rrnp(
       g,
       &nearest_neighbors_max_dist_heap,
@@ -500,7 +539,7 @@ pub fn insert_approx<R: RngCore>(
     }
   }
 
-  if g.use_lgd {
+  if g.config.use_lgd {
     apply_lgd(
       g,
       &nearest_neighbors_max_dist_heap,
@@ -625,8 +664,7 @@ mod tests {
     let q = [1.2f32];
     let SearchResults {
       nearest_neighbors_max_dist_heap,
-      visited_nodes,
-      visited_node_distances_to_q,
+      ..
     } = knn_beam_search(
       &g,
       |i| sq_euclidean_faster(&db[i as usize], &q),
@@ -718,4 +756,32 @@ mod tests {
     }
     g.consistency_check();
   }
+
+  // #[test]
+  // fn test_insert_approx_from_empty() {
+  //   let db = vec![
+  //     [1f32],
+  //     [2f32],
+  //     [3f32],
+  //     [10f32],
+  //     [11f32],
+  //     [12f32],
+  //     [18f32],
+  //     [19f32],
+  //     [20f32],
+  //     [21f32],
+  //     [22f32],
+  //   ];
+  //   let mut g = DenseKNNGraph::empty(10, 5);
+  //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  //   insert_approx(
+  //     &mut g,
+  //     0,
+  //     |j| sq_euclidean_faster(&db[0 as usize], &db[j as usize]),
+  //     1,
+  //     &mut prng,
+  //   );
+
+  //   g.consistency_check();
+  // }
 }
