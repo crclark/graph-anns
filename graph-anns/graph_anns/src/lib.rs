@@ -95,13 +95,18 @@ const DEFAULT_LAMBDA: u8 = 0;
 //    It wouldn't be too hard -- just need to flip a bool and allocate some
 //    memory.
 
-#[derive(Debug)]
-pub struct KNNGraphConfig {
+#[derive(Clone, Copy)]
+pub struct KNNGraphConfig<'a, T> {
   /// The max number of vertices that can be inserted into the graph. Constant.
   pub capacity: u32,
   /// The number of approximate nearest neighbors to store for each inserted
   /// element. This is a constant.
   pub out_degree: u32,
+  /// Number of simultaneous searchers in the beam search.
+  pub num_searchers: u32,
+  /// distance function. Must satisfy the criteria of a metric:
+  /// https://en.wikipedia.org/wiki/Metric_(mathematics)
+  pub dist_fn: &'a dyn Fn(&T, &T) -> f32,
   /// Whether to use restricted recursive neighborhood propagation. This improves
   /// search speed, but decreases insertion throughput. TODO: verify that's
   /// true.
@@ -115,17 +120,21 @@ pub struct KNNGraphConfig {
 // NOTE: can't do a Default because we can't guess a reasonable capacity.
 // TODO: auto-resize like a Vec?
 
-impl KNNGraphConfig {
+impl<'a, T> KNNGraphConfig<'a, T> {
   /// Create a new KNNGraphConfig.
   pub fn new(
     capacity: u32,
     out_degree: u32,
+    num_searchers: u32,
+    dist_fn: &'a dyn Fn(&T, &T) -> f32,
     use_rrnp: bool,
     use_lgd: bool,
-  ) -> KNNGraphConfig {
-    KNNGraphConfig {
+  ) -> KNNGraphConfig<'a, T> {
+    KNNGraphConfig::<'a, T> {
       capacity,
       out_degree,
+      num_searchers,
+      dist_fn,
       use_rrnp,
       use_lgd,
     }
@@ -285,13 +294,11 @@ fn convert_bruteforce_to_dense<
   S: BuildHasher,
 >(
   bf: &mut BruteForceKNN<'a, T>,
-  capacity: u32,
-  k: u32,
-  dist_fn: &dyn Fn(&T, &T) -> f32,
-  build_hasher: S,
-) -> DenseKNNGraph<T, S> {
+  config: KNNGraphConfig<'a, T>,
+  build_hasher: S, // TODO: move build_hasher into config
+) -> DenseKNNGraph<'a, T, S> {
   let ids = bf.contents.iter().collect();
-  exhaustive_knn_graph(ids, capacity, k, dist_fn, build_hasher)
+  exhaustive_knn_graph(ids, config, build_hasher)
 }
 
 /// Switches from brute-force to approximate nearest neighbor search based on
@@ -299,30 +306,58 @@ fn convert_bruteforce_to_dense<
 pub enum KNN<'a, T, S: BuildHasher> {
   Small {
     g: BruteForceKNN<'a, T>,
-    capacity: u32,
-    k: u32,
-    dist_fn: &'a dyn Fn(&T, &T) -> f32,
+    config: KNNGraphConfig<'a, T>,
     build_hasher: S,
   },
 
-  Large(DenseKNNGraph<T, S>),
+  Large(DenseKNNGraph<'a, T, S>),
 }
 
-// impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher> NN<T>
-//   for KNN<'a, T, S>
-// {
-//   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
-//     match self {
-//       KNN::Small { g, .. } => g.insert(x, prng),
-//       KNN::Large(g) => g.insert(x, prng),
-//     }
-//   }
-// }
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
+  for KNN<'a, T, S>
+{
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+    match self {
+      KNN::Small {
+        g,
+        config,
+        build_hasher,
+      } => {
+        if config.capacity as usize == g.contents.len() {
+          panic!("TODO create error type etc.");
+        } else if g.contents.len() == 100 {
+          *self = KNN::Large(convert_bruteforce_to_dense(
+            g,
+            config.clone(),
+            build_hasher.clone(),
+          ));
+          self.insert(x, prng);
+        } else {
+          g.insert(x, prng);
+        }
+      }
+      KNN::Large(g) => g.insert(x, prng),
+    }
+  }
+
+  fn delete(&mut self, x: T) -> () {
+    unimplemented!()
+  }
+
+  fn query<R: RngCore>(
+    &self,
+    max_results: usize,
+    prng: &mut R,
+    q: T,
+  ) -> SearchResults<T> {
+    unimplemented!()
+  }
+}
 
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
-pub struct DenseKNNGraph<T, S: BuildHasher> {
+pub struct DenseKNNGraph<'a, T, S: BuildHasher> {
   /// A mapping from the user's ID type, T, to our internal ids, which are u32.
   /// TODO: now that we have to store a hashmap anyway, are we gaining anything
   /// by storing edges as a vector? We could potentially simplify by eliminating
@@ -344,27 +379,29 @@ pub struct DenseKNNGraph<T, S: BuildHasher> {
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
   pub backpointers: Vec<SetU32>,
-  pub config: KNNGraphConfig,
+  pub config: KNNGraphConfig<'a, T>,
 }
 
-impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher> DenseKNNGraph<T, S> {
+impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher>
+  DenseKNNGraph<'a, T, S>
+{
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   fn empty(
-    capacity: u32,
-    out_degree: u32,
+    config: KNNGraphConfig<'a, T>,
     build_hasher: S,
-  ) -> DenseKNNGraph<T, S> {
+  ) -> DenseKNNGraph<'a, T, S> {
     let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
-      capacity,
+      config.capacity,
       build_hasher,
     );
 
-    let edges = Vec::with_capacity(capacity as usize * out_degree as usize);
+    let edges =
+      Vec::with_capacity(config.capacity as usize * config.out_degree as usize);
 
-    let mut backpointers = Vec::with_capacity(capacity as usize);
+    let mut backpointers = Vec::with_capacity(config.capacity as usize);
 
-    for _ in 0..capacity {
+    for _ in 0..config.capacity {
       backpointers.push(SetU32::new());
     }
 
@@ -373,8 +410,6 @@ impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher> DenseKNNGraph<T, S> {
     // TODO: expose as params once supported.
     let use_rrnp = false;
     let use_lgd = false;
-
-    let config = KNNGraphConfig::new(capacity, out_degree, use_rrnp, use_lgd);
 
     DenseKNNGraph {
       mapping,
@@ -506,6 +541,27 @@ impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher> DenseKNNGraph<T, S> {
   }
 }
 
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher> NN<T>
+  for DenseKNNGraph<'a, T, S>
+{
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+    todo!()
+  }
+
+  fn delete(&mut self, x: T) -> () {
+    todo!()
+  }
+
+  fn query<R: RngCore>(
+    &self,
+    max_results: usize,
+    prng: &mut R,
+    q: T,
+  ) -> SearchResults<T> {
+    todo!()
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SearchResult<T> {
   pub id: T,
@@ -570,12 +626,11 @@ pub fn knn_beam_search<
   R: RngCore,
 >(
   g: &DenseKNNGraph<T, S>,
-  dist_to_q: &dyn Fn(&T) -> f32,
-  num_searchers: usize,
+  q: T,
   k: usize,
   prng: &mut R,
 ) -> SearchResults<T> {
-  assert!(num_searchers <= g.num_vertices as usize);
+  assert!(g.config.num_searchers <= g.num_vertices);
   assert!(k <= g.num_vertices as usize);
   let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
   let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> = BinaryHeap::new();
@@ -583,10 +638,14 @@ pub fn knn_beam_search<
   let mut visited_distances: HashMap<T, f32> = HashMap::default();
 
   // lines 2 to 10 of the pseudocode
-  for r in sample(prng, g.num_vertices as usize, num_searchers) {
+  for r in sample(
+    prng,
+    g.num_vertices as usize,
+    g.config.num_searchers as usize,
+  ) {
     let r = r as u32;
     let r_ext = g.mapping.int_to_ext(r);
-    let r_dist = dist_to_q(r_ext);
+    let r_dist = (g.config.dist_fn)(&q, r_ext);
     visited.insert(*r_ext);
     visited_distances.insert(*r_ext, r_dist);
     r_min_heap.push(Reverse(SearchResult::new(*r_ext, r_dist)));
@@ -626,8 +685,8 @@ pub fn knn_beam_search<
       let e_ext = g.mapping.int_to_ext(e);
       if !visited.contains(&e_ext) {
         visited.insert(*e_ext);
-        let e_dist = dist_to_q(e_ext);
-        let f_dist = dist_to_q(&f.id);
+        let e_dist = (g.config.dist_fn)(&q, e_ext);
+        let f_dist = (g.config.dist_fn)(&q, &f.id);
         visited_distances.insert(*e_ext, e_dist);
         if e_dist < f_dist || q_max_heap.len() < k {
           q_max_heap.push(SearchResult::new(*e_ext, e_dist));
@@ -647,21 +706,22 @@ pub fn knn_beam_search<
 /// Constructs an exact k-nn graph on the given IDs. O(n^2).
 /// `capacity` is max capacity of the returned graph (for future inserts).
 /// Must be >= n.
-pub fn exhaustive_knn_graph<T: Copy + Eq + std::hash::Hash, S: BuildHasher>(
+pub fn exhaustive_knn_graph<
+  'a,
+  T: Copy + Eq + std::hash::Hash,
+  S: BuildHasher,
+>(
   ids: Vec<&T>,
-  capacity: u32,
-  k: u32,
-  dist_fn: &dyn Fn(&T, &T) -> f32,
+  config: KNNGraphConfig<'a, T>,
   build_hasher: S,
-) -> DenseKNNGraph<T, S> {
+) -> DenseKNNGraph<'a, T, S> {
   let n = ids.len();
   // TODO: return Either
-  if k >= n as u32 {
+  if config.out_degree >= n as u32 {
     panic!("k must be less than n");
   }
 
-  let mut g: DenseKNNGraph<T, S> =
-    DenseKNNGraph::empty(capacity, k, build_hasher);
+  let mut g: DenseKNNGraph<T, S> = DenseKNNGraph::empty(config, build_hasher);
 
   for i_ext in ids.iter() {
     let mut knn = BinaryHeap::new();
@@ -671,10 +731,10 @@ pub fn exhaustive_knn_graph<T: Copy + Eq + std::hash::Hash, S: BuildHasher>(
         continue;
       }
       let j = g.mapping.insert(**j_ext);
-      let dist = dist_fn(i_ext, j_ext);
+      let dist = (config.dist_fn)(i_ext, j_ext);
       knn.push(SearchResult::new(j, dist));
 
-      while knn.len() > k as usize {
+      while knn.len() > config.out_degree as usize {
         knn.pop();
       }
     }
@@ -729,8 +789,6 @@ pub fn insert_approx<
 >(
   g: &mut DenseKNNGraph<T, S>,
   q: T,
-  dist_to_q: &dyn Fn(&T) -> f32,
-  num_searchers: usize,
   prng: &mut R,
 ) -> () {
   //TODO: return the index of the new data point
@@ -738,13 +796,7 @@ pub fn insert_approx<
     nearest_neighbors_max_dist_heap,
     visited_nodes,
     visited_node_distances_to_q,
-  } = knn_beam_search(
-    g,
-    dist_to_q,
-    num_searchers,
-    g.config.out_degree as usize,
-    prng,
-  );
+  } = knn_beam_search(g, q, g.config.num_searchers as usize, prng);
 
   if g.config.use_rrnp {
     rrnp(
@@ -827,7 +879,7 @@ pub fn insert_approx<
 
 #[cfg(test)]
 mod tests {
-  use std::{hash::BuildHasherDefault, iter::FromIterator};
+  use std::hash::BuildHasherDefault;
 
   use super::*;
   use nohash_hasher::NoHashHasher;
@@ -874,14 +926,35 @@ mod tests {
     result
   }
 
+  fn mk_config<'a, T>(
+    capacity: u32,
+    dist_fn: &'a dyn Fn(&T, &T) -> f32,
+  ) -> KNNGraphConfig<'a, T> {
+    let out_degree = 5;
+    let num_searchers = 5;
+    let use_rrnp = false;
+    let use_lgd = false;
+    KNNGraphConfig::<'a, T> {
+      capacity,
+      out_degree,
+      num_searchers,
+      dist_fn,
+      use_rrnp,
+      use_lgd,
+    }
+  }
+
   #[test]
   fn test_exhaustive_knn_graph() {
-    let db = vec![[1], [2], [3], [10], [11], [12]];
+    let db: Vec<[i32; 1]> = vec![[1], [2], [3], [10], [11], [12]];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut config = mk_config(10, dist_fn);
+    config.out_degree = 2;
     let g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
       vec![&0u32, &1, &2, &3, &4, &5],
-      10,
-      2,
-      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      config,
       nohash_hasher::BuildNoHashHasher::default(),
     );
     g.consistency_check();
@@ -896,11 +969,14 @@ mod tests {
   #[test]
   fn test_beam_search_fully_connected_graph() {
     let db = vec![[1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut config = mk_config(10, dist_fn);
+    config.out_degree = 2;
     let g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
       vec![&0, &1, &2, &3, &4, &5],
-      10,
-      5,
-      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      config,
       nohash_hasher::BuildNoHashHasher::default(),
     );
     g.consistency_check();
@@ -909,26 +985,22 @@ mod tests {
     let SearchResults {
       nearest_neighbors_max_dist_heap,
       ..
-    } = knn_beam_search(
-      &g,
-      &|i| sq_euclidean_faster(&db[*i as usize], &q),
-      1,
-      2,
-      &mut prng,
-    );
+    } = knn_beam_search(&g, 1, 2, &mut prng);
     assert_eq!(
       nearest_neighbors_max_dist_heap
         .iter()
-        .map(|x| x.id)
-        .collect::<Vec<u32>>(),
-      vec![1u32, 0]
+        .map(|x| (x.id, x.dist))
+        .collect::<Vec<(u32, f32)>>(),
+      vec![(0, 1.0), (1u32, 0.0)]
     );
   }
 
   #[test]
   fn test_insert_vertex() {
+    let mut config = mk_config(3, &|x, y| 1.0);
+    config.out_degree = 2;
     let mut g: DenseKNNGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
-      DenseKNNGraph::empty(3, 2, nohash_hasher::BuildNoHashHasher::default());
+      DenseKNNGraph::empty(config, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -941,8 +1013,10 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
-    let mut g: DenseKNNGraph<u32, NHH> =
-      DenseKNNGraph::empty(2, 2, nohash_hasher::BuildNoHashHasher::default());
+    let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(
+      mk_config(2, &|x, y| 1.0),
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -951,16 +1025,20 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
-    let mut g: DenseKNNGraph<u32, NHH> =
-      DenseKNNGraph::empty(2, 2, nohash_hasher::BuildNoHashHasher::default());
+    let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(
+      mk_config(2, &|x, y| 1.0),
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
     g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
   }
 
   #[test]
   fn test_insert_edge_if_closer() {
+    let mut config = mk_config(3, &|&x, &y| 1.0);
+    config.out_degree = 1;
     let mut g: DenseKNNGraph<u32, NHH> =
-      DenseKNNGraph::empty(3, 1, nohash_hasher::BuildNoHashHasher::default());
+      DenseKNNGraph::empty(config, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2], vec![2.0]);
     g.insert_vertex(1, vec![2], vec![1.0]);
     g.insert_vertex(2, vec![1], vec![1.0]);
@@ -989,23 +1067,18 @@ mod tests {
       [21f32],
       [22f32],
     ];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
     let mut g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
       vec![&0, &1, &2, &3, &4, &5],
-      11,
-      5,
-      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      mk_config(11, dist_fn),
       nohash_hasher::BuildNoHashHasher::default(),
     );
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
       println!("doing {}", i);
-      insert_approx(
-        &mut g,
-        i,
-        &|j| sq_euclidean_faster(&db[i as usize], &db[*j as usize]),
-        5,
-        &mut prng,
-      );
+      insert_approx(&mut g, i, &mut prng);
     }
     g.consistency_check();
   }
@@ -1025,16 +1098,15 @@ mod tests {
   //     [21f32],
   //     [22f32],
   //   ];
-  //   let mut g: DenseKNNGraph<u32, NHH> =
-  //     DenseKNNGraph::empty(10, 5, nohash_hasher::BuildNoHashHasher::default());
-  //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  //   insert_approx(
-  //     &mut g,
-  //     0,
-  //     &|j| sq_euclidean_faster(&db[0 as usize], &db[*j as usize]),
-  //     1,
-  //     &mut prng,
+  //   let dist_fn = &|x: &u32, y: &u32| {
+  //     sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+  //   };
+  //   let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(
+  //     mk_config(10, dist_fn),
+  //     nohash_hasher::BuildNoHashHasher::default(),
   //   );
+  //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  //   insert_approx(&mut g, 0, &mut prng);
 
   //   g.consistency_check();
   // }

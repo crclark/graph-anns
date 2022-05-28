@@ -1,5 +1,4 @@
 extern crate criterion;
-use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
 use std::iter::FromIterator;
 use std::time::Duration;
@@ -33,16 +32,30 @@ fn hamming_dist(x: &u32, y: &u32) -> f32 {
   return result as f32;
 }
 
-fn construct_graph(
+fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32> {
+  let out_degree = 5;
+  let num_searchers = 5;
+  let use_rrnp = false;
+  let use_lgd = false;
+  let dist_fn = &hamming_dist;
+  KNNGraphConfig::<'a, u32> {
+    capacity,
+    out_degree,
+    num_searchers,
+    dist_fn,
+    use_rrnp,
+    use_lgd,
+  }
+}
+
+fn construct_graph<'a>(
   n: u32,
   capacity: u32,
-) -> DenseKNNGraph<u32, nohash_hasher::BuildNoHashHasher<u32>> {
+) -> DenseKNNGraph<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
   let ids = Vec::<u32>::from_iter(0..n);
   let g = exhaustive_knn_graph(
     ids.iter().collect(),
-    capacity,
-    5,
-    &|x, y| hamming_dist(x, y),
+    mk_config(capacity),
     nohash_hasher::BuildNoHashHasher::default(),
   );
   return g;
@@ -70,9 +83,7 @@ fn bench_insert_one(c: &mut Criterion) {
       let mk_g = || construct_graph(n, n + 1);
       b.iter_batched(
         mk_g,
-        |mut g| {
-          insert_approx(&mut g, n, &|i| hamming_dist(&(n + 1), i), 5, &mut prng)
-        },
+        |mut g| insert_approx(&mut g, n, &mut prng),
         BatchSize::SmallInput,
       )
     });
@@ -84,13 +95,11 @@ fn construct_graph_approx_iterative(n: u32) {
   let ids = Vec::<u32>::from_iter(0..50);
   let mut g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
     ids.iter().collect(),
-    n,
-    5,
-    &hamming_dist,
+    mk_config(n),
     nohash_hasher::BuildNoHashHasher::default(),
   );
   for q in 50..n {
-    insert_approx(&mut g, q, &|i| hamming_dist(&q, i), 5, &mut prng);
+    insert_approx(&mut g, q, &mut prng);
   }
 }
 
