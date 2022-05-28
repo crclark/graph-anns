@@ -11,7 +11,9 @@ use rand::RngCore;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 use tinyset::SetU32;
 
 const DEFAULT_LAMBDA: u8 = 0;
@@ -130,11 +132,203 @@ impl KNNGraphConfig {
   }
 }
 
+// TODO: test that query can find already-inserted items
+
+trait NN<T> {
+  // TODO: return types with error sums, more informative delete (did it exist?)
+  // etc.
+
+  // TODO: more functions in this interface.
+
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> ();
+  fn delete(&mut self, x: T) -> ();
+  fn query<R: RngCore>(
+    &self,
+    max_results: usize,
+    prng: &mut R,
+    q: T,
+  ) -> SearchResults<T>;
+}
+
+pub struct BruteForceKNN<'a, T> {
+  pub contents: HashSet<T>,
+  pub distance: &'a dyn Fn(&T, &T) -> f32,
+}
+
+impl<'a, T> BruteForceKNN<'a, T> {
+  pub fn new(distance: &'a dyn Fn(&T, &T) -> f32) -> BruteForceKNN<'a, T> {
+    BruteForceKNN {
+      contents: HashSet::new(),
+      distance,
+    }
+  }
+}
+
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
+  fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) -> () {
+    self.contents.insert(x);
+  }
+
+  fn delete(&mut self, x: T) -> () {
+    self.contents.remove(&x);
+  }
+
+  fn query<R: RngCore>(
+    &self,
+    max_results: usize,
+    _prng: &mut R,
+    q: T,
+  ) -> SearchResults<T> {
+    let mut nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>> =
+      BinaryHeap::new();
+    let mut visited_nodes: HashSet<T> = HashSet::new();
+    let mut visited_node_distances_to_q: HashMap<T, f32> = HashMap::default();
+    for x in self.contents.iter() {
+      let dist = (self.distance)(x, &q);
+      visited_nodes.insert(*x);
+      nearest_neighbors_max_dist_heap.push(SearchResult::new(*x, dist));
+      if nearest_neighbors_max_dist_heap.len() >= max_results {
+        nearest_neighbors_max_dist_heap.pop();
+      }
+      visited_node_distances_to_q.insert(*x, dist);
+    }
+    SearchResults {
+      nearest_neighbors_max_dist_heap,
+      visited_nodes,
+      visited_node_distances_to_q,
+    }
+  }
+}
+
+/// Maps from the user's chosen ID type to our internal u32 ids that are used
+/// within the core search functions to keep things fast and compact.
+/// Ideally, we should translate to and from user ids at the edges of
+/// performance-critical code. In practice, doing so may be difficult, since the
+/// user's distance callback is passed the user's IDs.
+#[derive(Debug)]
+pub struct InternalExternalIDMapping<T, S: BuildHasher> {
+  pub capacity: u32,
+  // TODO: using a vec might be faster.
+  pub internal_to_external_ids: IntMap<u32, T>,
+  pub external_to_internal_ids: HashMap<T, u32, S>,
+  // TODO: we may also need a fast is_deleted check for internal ids.
+  pub deleted: Vec<u32>,
+}
+
+impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher>
+  InternalExternalIDMapping<T, S>
+{
+  fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
+    let internal_to_external_ids = IntMap::<u32, T>::with_capacity_and_hasher(
+      capacity as usize,
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
+    let external_to_internal_ids =
+      HashMap::with_capacity_and_hasher(capacity as usize, hash_builder);
+
+    let deleted = Vec::<u32>::new();
+    InternalExternalIDMapping {
+      capacity,
+      internal_to_external_ids,
+      external_to_internal_ids,
+      deleted,
+    }
+  }
+
+  fn insert(self: &mut Self, x: T) -> u32 {
+    match self.external_to_internal_ids.get(&x) {
+      Some(id) => {
+        return (*id).clone();
+      }
+      None => {
+        let x_int = match self.deleted.pop() {
+          None => self.internal_to_external_ids.len() as u32,
+          Some(i) => i,
+        };
+        if x_int > self.capacity {
+          panic!("exceeded capacity TODO: bubble up error");
+        }
+
+        self.internal_to_external_ids.insert(x_int, x);
+        self.external_to_internal_ids.insert(x, x_int);
+        return x_int;
+      }
+    }
+  }
+
+  fn int_to_ext(self: &Self, x: u32) -> &T {
+    match self.internal_to_external_ids.get(&x) {
+      None => panic!("internal error: unknown internal id: {}", x),
+      Some(i) => i,
+    }
+  }
+
+  fn ext_to_int(self: &Self, x: &T) -> &u32 {
+    match self.external_to_internal_ids.get(x) {
+      None => panic!("external error: unknown external id"),
+      Some(i) => i,
+    }
+  }
+
+  fn delete(self: &mut Self, x: &T) -> u32 {
+    let x_int = (*self.ext_to_int(x)).clone();
+    self.deleted.push(x_int);
+    self.internal_to_external_ids.remove(&x_int);
+    self.external_to_internal_ids.remove(&x);
+    return x_int;
+  }
+}
+
+fn convert_bruteforce_to_dense<
+  'a,
+  T: Copy + Eq + std::hash::Hash,
+  S: BuildHasher,
+>(
+  bf: &mut BruteForceKNN<'a, T>,
+  capacity: u32,
+  k: u32,
+  dist_fn: &dyn Fn(&T, &T) -> f32,
+  build_hasher: S,
+) -> DenseKNNGraph<T, S> {
+  let ids = bf.contents.iter().collect();
+  exhaustive_knn_graph(ids, capacity, k, dist_fn, build_hasher)
+}
+
+/// Switches from brute-force to approximate nearest neighbor search based on
+/// the number of inserted elements.
+pub enum KNN<'a, T, S: BuildHasher> {
+  Small {
+    g: BruteForceKNN<'a, T>,
+    capacity: u32,
+    k: u32,
+    dist_fn: &'a dyn Fn(&T, &T) -> f32,
+    build_hasher: S,
+  },
+
+  Large(DenseKNNGraph<T, S>),
+}
+
+// impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher> NN<T>
+//   for KNN<'a, T, S>
+// {
+//   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+//     match self {
+//       KNN::Small { g, .. } => g.insert(x, prng),
+//       KNN::Large(g) => g.insert(x, prng),
+//     }
+//   }
+// }
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
-#[derive(Debug)]
-pub struct DenseKNNGraph {
+pub struct DenseKNNGraph<T, S: BuildHasher> {
+  /// A mapping from the user's ID type, T, to our internal ids, which are u32.
+  /// TODO: now that we have to store a hashmap anyway, are we gaining anything
+  /// by storing edges as a vector? We could potentially simplify by eliminating
+  /// it and the external/internal id distinction. I think all we gain is a
+  /// more memory-efficient adjacency list... which may be a decisive factor.
+  pub mapping: InternalExternalIDMapping<T, S>,
   /// n, the current number of vertices in the graph. The valid indices of the
   /// graph are 0 to n-1.
   pub num_vertices: u32,
@@ -153,10 +347,19 @@ pub struct DenseKNNGraph {
   pub config: KNNGraphConfig,
 }
 
-impl DenseKNNGraph {
+impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher> DenseKNNGraph<T, S> {
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
-  fn empty(capacity: u32, out_degree: u32) -> DenseKNNGraph {
+  fn empty(
+    capacity: u32,
+    out_degree: u32,
+    build_hasher: S,
+  ) -> DenseKNNGraph<T, S> {
+    let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
+      capacity,
+      build_hasher,
+    );
+
     let edges = Vec::with_capacity(capacity as usize * out_degree as usize);
 
     let mut backpointers = Vec::with_capacity(capacity as usize);
@@ -174,6 +377,7 @@ impl DenseKNNGraph {
     let config = KNNGraphConfig::new(capacity, out_degree, use_rrnp, use_lgd);
 
     DenseKNNGraph {
+      mapping,
       num_vertices,
       edges,
       backpointers,
@@ -303,41 +507,48 @@ impl DenseKNNGraph {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct SearchResult {
-  pub vec_index: u32,
+pub struct SearchResult<T> {
+  pub id: T,
   pub dist: f32,
 }
 
-impl SearchResult {
-  pub fn new(vec_index: u32, dist: f32) -> SearchResult {
-    Self { vec_index, dist }
+impl<T> SearchResult<T> {
+  pub fn new(id: T, dist: f32) -> SearchResult<T> {
+    Self { id, dist }
   }
 }
 
-impl PartialEq for SearchResult {
+impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> PartialEq
+  for SearchResult<T>
+{
   fn eq(&self, other: &Self) -> bool {
-    self.vec_index == other.vec_index
+    self.id == other.id
   }
 }
 
-impl Eq for SearchResult {}
+impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> Eq for SearchResult<T> {}
 
-impl PartialOrd for SearchResult {
+impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> PartialOrd
+  for SearchResult<T>
+{
   fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
     self.dist.partial_cmp(&other.dist)
   }
 }
 
-impl Ord for SearchResult {
+impl<T: Ord> Ord for SearchResult<T> {
   fn cmp(&self, other: &Self) -> Ordering {
     self.dist.total_cmp(&other.dist)
   }
 }
 
-pub struct SearchResults {
-  pub nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult>,
-  pub visited_nodes: HashSet<u32>,
-  pub visited_node_distances_to_q: IntMap<u32, f32>,
+pub struct SearchResults<T> {
+  pub nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>>,
+  // TODO: allow user to optimize this with nohash_hasher somehow.
+  // either allow them to pass in a hasher, or use specializations.
+  // The former complicates the API but is more extensible.
+  pub visited_nodes: HashSet<T>,
+  pub visited_node_distances_to_q: HashMap<T, f32>,
 }
 
 // TODO: return fewer than expected results if num_searchers or k is
@@ -353,36 +564,41 @@ pub struct SearchResults {
 /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
 /// This is a translation of the pseudocode of algorithm 1 from
 /// Approximate k-NN Graph Construction: A Generic Online Approach
-pub fn knn_beam_search<R: RngCore>(
-  g: &DenseKNNGraph,
-  dist_to_q: impl Fn(u32) -> f32,
+pub fn knn_beam_search<
+  T: Copy + Ord + Eq + std::hash::Hash,
+  S: BuildHasher,
+  R: RngCore,
+>(
+  g: &DenseKNNGraph<T, S>,
+  dist_to_q: &dyn Fn(&T) -> f32,
   num_searchers: usize,
   k: usize,
   prng: &mut R,
-) -> SearchResults {
+) -> SearchResults<T> {
   assert!(num_searchers <= g.num_vertices as usize);
   assert!(k <= g.num_vertices as usize);
-  let mut q_max_heap: BinaryHeap<SearchResult> = BinaryHeap::new();
-  let mut r_min_heap: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
-  let mut visited = HashSet::<u32>::new();
-  let mut visited_distances: IntMap<u32, f32> = IntMap::default();
+  let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
+  let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> = BinaryHeap::new();
+  let mut visited = HashSet::<T>::new();
+  let mut visited_distances: HashMap<T, f32> = HashMap::default();
 
   // lines 2 to 10 of the pseudocode
   for r in sample(prng, g.num_vertices as usize, num_searchers) {
     let r = r as u32;
-    let r_dist = dist_to_q(r);
-    visited.insert(r);
-    visited_distances.insert(r, r_dist);
-    r_min_heap.push(Reverse(SearchResult::new(r, r_dist)));
+    let r_ext = g.mapping.int_to_ext(r);
+    let r_dist = dist_to_q(r_ext);
+    visited.insert(*r_ext);
+    visited_distances.insert(*r_ext, r_dist);
+    r_min_heap.push(Reverse(SearchResult::new(*r_ext, r_dist)));
     match q_max_heap.peek() {
       None => {
-        q_max_heap.push(SearchResult::new(r, r_dist));
+        q_max_heap.push(SearchResult::new(*r_ext, r_dist));
         // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
         // We are skipping it here since we did it above.
       }
       Some(f) => {
         if r_dist < f.dist || q_max_heap.len() < k {
-          q_max_heap.push(SearchResult::new(r, r_dist));
+          q_max_heap.push(SearchResult::new(*r_ext, r_dist));
         }
       }
     }
@@ -394,26 +610,28 @@ pub fn knn_beam_search<R: RngCore>(
       q_max_heap.pop();
     }
 
-    let Reverse(r) = r_min_heap.pop().unwrap();
+    let Reverse(sr) = r_min_heap.pop().unwrap();
     let &f = { q_max_heap.peek().unwrap() };
-    if r.dist > f.dist {
+    let sr_int = g.mapping.ext_to_int(&sr.id);
+    if sr.dist > f.dist {
       break;
     }
 
-    let mut r_nbrs = g.backpointers[r.vec_index as usize].clone();
-    for (nbr, _, _) in g.get_edges(r.vec_index).iter() {
+    let mut r_nbrs = g.backpointers[*sr_int as usize].clone();
+    for (nbr, _, _) in g.get_edges(*sr_int).iter() {
       r_nbrs.insert(*nbr);
     }
 
     for e in r_nbrs.iter() {
-      if !visited.contains(&e) {
-        visited.insert(e);
-        let e_dist = dist_to_q(e);
-        let f_dist = dist_to_q(f.vec_index);
-        visited_distances.insert(e, e_dist);
+      let e_ext = g.mapping.int_to_ext(e);
+      if !visited.contains(&e_ext) {
+        visited.insert(*e_ext);
+        let e_dist = dist_to_q(e_ext);
+        let f_dist = dist_to_q(&f.id);
+        visited_distances.insert(*e_ext, e_dist);
         if e_dist < f_dist || q_max_heap.len() < k {
-          q_max_heap.push(SearchResult::new(e, e_dist));
-          r_min_heap.push(Reverse(SearchResult::new(e, e_dist)));
+          q_max_heap.push(SearchResult::new(*e_ext, e_dist));
+          r_min_heap.push(Reverse(SearchResult::new(*e_ext, e_dist)));
         }
       }
     }
@@ -426,29 +644,34 @@ pub fn knn_beam_search<R: RngCore>(
   }
 }
 
-/// Constructs an exact k-nn graph on the first n items in db. O(n^2).
+/// Constructs an exact k-nn graph on the given IDs. O(n^2).
 /// `capacity` is max capacity of the returned graph (for future inserts).
 /// Must be >= n.
-pub fn exhaustive_knn_graph(
-  n: u32,
+pub fn exhaustive_knn_graph<T: Copy + Eq + std::hash::Hash, S: BuildHasher>(
+  ids: Vec<&T>,
   capacity: u32,
   k: u32,
-  dist_fn: &dyn Fn(u32, u32) -> f32,
-) -> DenseKNNGraph {
+  dist_fn: &dyn Fn(&T, &T) -> f32,
+  build_hasher: S,
+) -> DenseKNNGraph<T, S> {
+  let n = ids.len();
   // TODO: return Either
-  if k >= n {
+  if k >= n as u32 {
     panic!("k must be less than n");
   }
 
-  let mut g = DenseKNNGraph::empty(capacity, k);
+  let mut g: DenseKNNGraph<T, S> =
+    DenseKNNGraph::empty(capacity, k, build_hasher);
 
-  for i in 0..n {
+  for i_ext in ids.iter() {
     let mut knn = BinaryHeap::new();
-    for j in 0..n {
-      if i == j {
+    let i = g.mapping.insert(**i_ext);
+    for j_ext in ids.iter() {
+      if i_ext == j_ext {
         continue;
       }
-      let dist = dist_fn(i, j);
+      let j = g.mapping.insert(**j_ext);
+      let dist = dist_fn(i_ext, j_ext);
       knn.push(SearchResult::new(j, dist));
 
       while knn.len() > k as usize {
@@ -456,36 +679,36 @@ pub fn exhaustive_knn_graph(
       }
     }
     while knn.len() > 0 {
-      let SearchResult { vec_index, dist } = knn.pop().unwrap();
-      g.edges.push((vec_index, dist, DEFAULT_LAMBDA));
-      let s = &mut g.backpointers[vec_index as usize];
+      let SearchResult { id, dist } = knn.pop().unwrap();
+      g.edges.push((id, dist, DEFAULT_LAMBDA));
+      let s = &mut g.backpointers[id as usize];
       s.insert(i);
     }
   }
 
-  g.num_vertices = n;
+  g.num_vertices = ids.len() as u32;
 
   for i in 0..n {
-    g.sort_edges(i)
+    g.sort_edges(i as u32)
   }
 
   g
 }
 
-fn rrnp(
-  _g: &mut DenseKNNGraph,
-  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
-  _visited_nodes: &HashSet<u32>,
-  _visited_nodes_distance_to_q: &IntMap<u32, f32>,
+fn rrnp<T, S: BuildHasher>(
+  _g: &mut DenseKNNGraph<T, S>,
+  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult<T>>,
+  _visited_nodes: &HashSet<T>,
+  _visited_nodes_distance_to_q: &HashMap<T, f32>,
 ) -> () {
   unimplemented!()
 }
 
-fn apply_lgd(
-  _g: &mut DenseKNNGraph,
-  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult>,
-  _visited_nodes: &HashSet<u32>,
-  _visited_nodes_distance_to_q: &IntMap<u32, f32>,
+fn apply_lgd<T, S: BuildHasher>(
+  _g: &mut DenseKNNGraph<T, S>,
+  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult<T>>,
+  _visited_nodes: &HashSet<T>,
+  _visited_nodes_distance_to_q: &HashMap<T, f32>,
 ) -> () {
   unimplemented!()
 }
@@ -499,10 +722,14 @@ fn apply_lgd(
 ///
 /// This is equivalent to one iteration of Algorithm 3 in
 /// "Approximate k-NN Graph Construction: A Generic Online Approach".
-pub fn insert_approx<R: RngCore>(
-  g: &mut DenseKNNGraph,
-  q: u32,
-  dist_to_q: impl Fn(u32) -> f32,
+pub fn insert_approx<
+  T: Copy + Eq + Ord + std::hash::Hash,
+  S: BuildHasher,
+  R: RngCore,
+>(
+  g: &mut DenseKNNGraph<T, S>,
+  q: T,
+  dist_to_q: &dyn Fn(&T) -> f32,
   num_searchers: usize,
   prng: &mut R,
 ) -> () {
@@ -529,13 +756,17 @@ pub fn insert_approx<R: RngCore>(
   } else {
     let (neighbors, dists) = nearest_neighbors_max_dist_heap
       .iter()
-      .map(|sr| (sr.vec_index, sr.dist))
+      .map(|sr| (g.mapping.ext_to_int(&sr.id), sr.dist))
       .unzip();
-    g.insert_vertex(q, neighbors, dists);
+    let q_int = g.mapping.insert(q);
+    g.insert_vertex(q_int, neighbors, dists);
 
-    //TODO: try to avoid clone
-    for r in visited_nodes.clone() {
-      g.insert_edge_if_closer(r, q, visited_node_distances_to_q[&r]);
+    for r in &visited_nodes {
+      g.insert_edge_if_closer(
+        *g.mapping.ext_to_int(&r),
+        q_int,
+        visited_node_distances_to_q[&r],
+      );
     }
   }
 
@@ -596,9 +827,14 @@ pub fn insert_approx<R: RngCore>(
 
 #[cfg(test)]
 mod tests {
+  use std::{hash::BuildHasherDefault, iter::FromIterator};
+
   use super::*;
+  use nohash_hasher::NoHashHasher;
   use rand::SeedableRng;
   use rand_xoshiro::Xoshiro256StarStar;
+
+  type NHH = BuildHasherDefault<NoHashHasher<u32>>;
 
   // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
   // PrimitiveToF32 mess is necessary. .into() is much slower.
@@ -641,9 +877,13 @@ mod tests {
   #[test]
   fn test_exhaustive_knn_graph() {
     let db = vec![[1], [2], [3], [10], [11], [12]];
-    let g = exhaustive_knn_graph(6, 10, 2, &|x, y| {
-      sq_euclidean_faster(&db[x as usize], &db[y as usize])
-    });
+    let g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
+      vec![&0u32, &1, &2, &3, &4, &5],
+      10,
+      2,
+      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
     assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
@@ -656,9 +896,13 @@ mod tests {
   #[test]
   fn test_beam_search_fully_connected_graph() {
     let db = vec![[1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
-    let g = exhaustive_knn_graph(6, 10, 5, &|x, y| {
-      sq_euclidean_faster(&db[x as usize], &db[y as usize])
-    });
+    let g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
+      vec![&0, &1, &2, &3, &4, &5],
+      10,
+      5,
+      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let q = [1.2f32];
@@ -667,7 +911,7 @@ mod tests {
       ..
     } = knn_beam_search(
       &g,
-      |i| sq_euclidean_faster(&db[i as usize], &q),
+      &|i| sq_euclidean_faster(&db[*i as usize], &q),
       1,
       2,
       &mut prng,
@@ -675,7 +919,7 @@ mod tests {
     assert_eq!(
       nearest_neighbors_max_dist_heap
         .iter()
-        .map(|x| x.vec_index)
+        .map(|x| x.id)
         .collect::<Vec<u32>>(),
       vec![1u32, 0]
     );
@@ -683,7 +927,8 @@ mod tests {
 
   #[test]
   fn test_insert_vertex() {
-    let mut g = DenseKNNGraph::empty(3, 2);
+    let mut g: DenseKNNGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
+      DenseKNNGraph::empty(3, 2, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -696,7 +941,8 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
-    let mut g = DenseKNNGraph::empty(2, 2);
+    let mut g: DenseKNNGraph<u32, NHH> =
+      DenseKNNGraph::empty(2, 2, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -705,14 +951,16 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
-    let mut g = DenseKNNGraph::empty(2, 2);
+    let mut g: DenseKNNGraph<u32, NHH> =
+      DenseKNNGraph::empty(2, 2, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
   }
 
   #[test]
   fn test_insert_edge_if_closer() {
-    let mut g = DenseKNNGraph::empty(3, 1);
+    let mut g: DenseKNNGraph<u32, NHH> =
+      DenseKNNGraph::empty(3, 1, nohash_hasher::BuildNoHashHasher::default());
     g.insert_vertex(0, vec![2], vec![2.0]);
     g.insert_vertex(1, vec![2], vec![1.0]);
     g.insert_vertex(2, vec![1], vec![1.0]);
@@ -741,15 +989,20 @@ mod tests {
       [21f32],
       [22f32],
     ];
-    let mut g = exhaustive_knn_graph(6, 11, 5, &|x, y| {
-      sq_euclidean_faster(&db[x as usize], &db[y as usize])
-    });
+    let mut g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
+      vec![&0, &1, &2, &3, &4, &5],
+      11,
+      5,
+      &|x, y| sq_euclidean_faster(&db[*x as usize], &db[*y as usize]),
+      nohash_hasher::BuildNoHashHasher::default(),
+    );
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
+      println!("doing {}", i);
       insert_approx(
         &mut g,
         i,
-        |j| sq_euclidean_faster(&db[i as usize], &db[j as usize]),
+        &|j| sq_euclidean_faster(&db[i as usize], &db[*j as usize]),
         5,
         &mut prng,
       );
@@ -772,12 +1025,13 @@ mod tests {
   //     [21f32],
   //     [22f32],
   //   ];
-  //   let mut g = DenseKNNGraph::empty(10, 5);
+  //   let mut g: DenseKNNGraph<u32, NHH> =
+  //     DenseKNNGraph::empty(10, 5, nohash_hasher::BuildNoHashHasher::default());
   //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   //   insert_approx(
   //     &mut g,
   //     0,
-  //     |j| sq_euclidean_faster(&db[0 as usize], &db[j as usize]),
+  //     &|j| sq_euclidean_faster(&db[0 as usize], &db[*j as usize]),
   //     1,
   //     &mut prng,
   //   );

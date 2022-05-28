@@ -11,13 +11,18 @@ extern crate rand_xoshiro;
 extern crate rayon;
 extern crate tinyset;
 
+use nohash_hasher::{BuildNoHashHasher, NoHashHasher};
 use rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
-use std::thread;
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::time::Instant;
+use std::{io, thread};
+
+use std::io::prelude::*;
 
 mod texmex;
 
@@ -232,16 +237,52 @@ fn _main_rayon() {
   );
 }
 
-fn main() {
-  let mmap_start = Instant::now();
-  let base_vecs =
-    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
-      .unwrap();
-  println!("mmaped dataset in {:?}", mmap_start.elapsed());
+// fn main() {
+//   let mmap_start = Instant::now();
+//   let base_vecs =
+//     texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
+//       .unwrap();
+//   println!("mmaped dataset in {:?}", mmap_start.elapsed());
 
-  let rand_init_graph_start = Instant::now();
-  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  println!("TODO: fix this");
+//   let rand_init_graph_start = Instant::now();
+//   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+//   println!("TODO: fix this");
+// }
+
+fn pause() {
+  let mut stdin = io::stdin();
+  let mut stdout = io::stdout();
+
+  // We want the cursor to stay at the end of the line, so we print without a newline and flush manually.
+  write!(stdout, "Press any key to continue...").unwrap();
+  stdout.flush().unwrap();
+
+  // Read a single byte and discard
+  let _ = stdin.read(&mut [0u8]).unwrap();
+}
+
+fn main() {
+  println!(
+    "let's see how much memory a 1-billion element HashMap<u32, u32> takes."
+  );
+  // Answer: about 9.5GiB with NoHashHasher, 18.5 with default hasher (not sure why it makes a difference)
+
+  let n = 1000_000_000;
+  let start = Instant::now();
+  let mut h =
+    HashMap::<u32, u32, BuildHasherDefault<NoHashHasher<u32>>>::with_capacity_and_hasher(n, BuildNoHashHasher::default());
+
+  for i in 0..n {
+    h.insert(i as u32, i as u32);
+    if i % 1000000 == 0 {
+      println!("inserted {}", i);
+    }
+  }
+
+  let duration = start.elapsed();
+
+  println!("Time elapsed: {:?}", duration);
+  pause();
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.
