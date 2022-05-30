@@ -146,7 +146,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
 
 // TODO: test that query can find already-inserted items
 
-trait NN<T> {
+pub trait NN<T> {
   // TODO: return types with error sums, more informative delete (did it exist?)
   // etc.
 
@@ -156,9 +156,9 @@ trait NN<T> {
   fn delete(&mut self, x: T) -> ();
   fn query<R: RngCore>(
     &self,
+    q: T,
     max_results: usize,
     prng: &mut R,
-    q: T,
   ) -> SearchResults<T>;
 }
 
@@ -187,9 +187,9 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
 
   fn query<R: RngCore>(
     &self,
+    q: T,
     max_results: usize,
     _prng: &mut R,
-    q: T,
   ) -> SearchResults<T> {
     let mut nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>> =
       BinaryHeap::new();
@@ -339,11 +339,14 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
 
   fn query<R: RngCore>(
     &self,
+    q: T,
     max_results: usize,
     prng: &mut R,
-    q: T,
   ) -> SearchResults<T> {
-    unimplemented!()
+    match self {
+      KNN::Small { g, .. } => g.query(q, max_results, prng),
+      KNN::Large(g) => g.query(q, max_results, prng),
+    }
   }
 }
 
@@ -534,21 +537,150 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   for DenseKNNGraph<'a, T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
-    todo!()
+  /// Inserts a new data point into the graph. The graph must not be full.
+  /// Optionally performs restricted recursive neighborhood propagation and
+  /// lazy graph diversification. These options are set when the graph is
+  /// constructed.
+  ///
+  /// This is equivalent to one iteration of Algorithm 3 in
+  /// "Approximate k-NN Graph Construction: A Generic Online Approach".
+  fn insert<R: RngCore>(&mut self, q: T, prng: &mut R) -> () {
+    //TODO: return the index of the new data point
+    let SearchResults {
+      nearest_neighbors_max_dist_heap,
+      visited_nodes,
+      visited_node_distances_to_q,
+    } = self.query(q, self.config.num_searchers as usize, prng);
+
+    if self.config.use_rrnp {
+      rrnp(
+        self,
+        &nearest_neighbors_max_dist_heap,
+        &visited_nodes,
+        &visited_node_distances_to_q,
+      );
+    } else {
+      let (neighbors, dists) = nearest_neighbors_max_dist_heap
+        .iter()
+        .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
+        .unzip();
+      let q_int = self.mapping.insert(q);
+      self.insert_vertex(q_int, neighbors, dists);
+
+      for r in &visited_nodes {
+        self.insert_edge_if_closer(
+          *self.mapping.ext_to_int(&r),
+          q_int,
+          visited_node_distances_to_q[&r],
+        );
+      }
+    }
+
+    if self.config.use_lgd {
+      apply_lgd(
+        self,
+        &nearest_neighbors_max_dist_heap,
+        &visited_nodes,
+        &visited_node_distances_to_q,
+      );
+    }
   }
 
   fn delete(&mut self, x: T) -> () {
     todo!()
   }
 
+  // TODO: return fewer than expected results if num_searchers or k is
+  // higher than num_vertices.
+
+  // TODO: tests for graph where n is not divisible by k, where n is very small,
+  // etc.
+
+  // TODO: add summary statistics to SearchResults? min, max, mean distance of
+  // visited nodes. Or just compute them in a more complex benchmark program.
+
+  /// Perform beam search for the k nearest neighbors of a point q. Returns
+  /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
+  /// This is a translation of the pseudocode of algorithm 1 from
+  /// Approximate k-NN Graph Construction: A Generic Online Approach
   fn query<R: RngCore>(
     &self,
+    q: T,
     max_results: usize,
     prng: &mut R,
-    q: T,
   ) -> SearchResults<T> {
-    todo!()
+    assert!(self.config.num_searchers <= self.num_vertices);
+    assert!(max_results <= self.num_vertices as usize);
+    let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
+    let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
+      BinaryHeap::new();
+    let mut visited = HashSet::<T>::new();
+    let mut visited_distances: HashMap<T, f32> = HashMap::default();
+
+    // lines 2 to 10 of the pseudocode
+    for r in sample(
+      prng,
+      self.num_vertices as usize,
+      self.config.num_searchers as usize,
+    ) {
+      let r = r as u32;
+      let r_ext = self.mapping.int_to_ext(r);
+      let r_dist = (self.config.dist_fn)(&q, r_ext);
+      visited.insert(*r_ext);
+      visited_distances.insert(*r_ext, r_dist);
+      r_min_heap.push(Reverse(SearchResult::new(*r_ext, r_dist)));
+      match q_max_heap.peek() {
+        None => {
+          q_max_heap.push(SearchResult::new(*r_ext, r_dist));
+          // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
+          // We are skipping it here since we did it above.
+        }
+        Some(f) => {
+          if r_dist < f.dist || q_max_heap.len() < max_results {
+            q_max_heap.push(SearchResult::new(*r_ext, r_dist));
+          }
+        }
+      }
+    }
+
+    // lines 11 to 27 of the pseudocode
+    while r_min_heap.len() > 0 {
+      while q_max_heap.len() > max_results {
+        q_max_heap.pop();
+      }
+
+      let Reverse(sr) = r_min_heap.pop().unwrap();
+      let &f = { q_max_heap.peek().unwrap() };
+      let sr_int = self.mapping.ext_to_int(&sr.id);
+      if sr.dist > f.dist {
+        break;
+      }
+
+      let mut r_nbrs = self.backpointers[*sr_int as usize].clone();
+      for (nbr, _, _) in self.get_edges(*sr_int).iter() {
+        r_nbrs.insert(*nbr);
+      }
+
+      for e in r_nbrs.iter() {
+        let e_ext = self.mapping.int_to_ext(e);
+        if !visited.contains(&e_ext) {
+          visited.insert(*e_ext);
+          let e_dist = (self.config.dist_fn)(&q, e_ext);
+          let f_dist = (self.config.dist_fn)(&q, &f.id);
+          visited_distances.insert(*e_ext, e_dist);
+          if e_dist < f_dist || q_max_heap.len() < max_results {
+            q_max_heap.push(SearchResult::new(*e_ext, e_dist));
+            r_min_heap.push(Reverse(SearchResult::new(*e_ext, e_dist)));
+          }
+        }
+      }
+    }
+
+    SearchResults {
+      nearest_neighbors_max_dist_heap: q_max_heap,
+      visited_nodes: visited,
+      visited_node_distances_to_q: visited_distances,
+    }
   }
 }
 
@@ -595,102 +727,6 @@ pub struct SearchResults<T> {
   // The former complicates the API but is more extensible.
   pub visited_nodes: HashSet<T>,
   pub visited_node_distances_to_q: HashMap<T, f32>,
-}
-
-// TODO: return fewer than expected results if num_searchers or k is
-// higher than num_vertices.
-
-// TODO: tests for graph where n is not divisible by k, where n is very small,
-// etc.
-
-// TODO: add summary statistics to SearchResults? min, max, mean distance of
-// visited nodes. Or just compute them in a more complex benchmark program.
-
-/// Perform beam search for the k nearest neighbors of a point q. Returns
-/// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
-/// This is a translation of the pseudocode of algorithm 1 from
-/// Approximate k-NN Graph Construction: A Generic Online Approach
-pub fn knn_beam_search<
-  T: Copy + Ord + Eq + std::hash::Hash,
-  S: BuildHasher + Clone,
-  R: RngCore,
->(
-  g: &DenseKNNGraph<T, S>,
-  q: T,
-  k: usize,
-  prng: &mut R,
-) -> SearchResults<T> {
-  assert!(g.config.num_searchers <= g.num_vertices);
-  assert!(k <= g.num_vertices as usize);
-  let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
-  let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> = BinaryHeap::new();
-  let mut visited = HashSet::<T>::new();
-  let mut visited_distances: HashMap<T, f32> = HashMap::default();
-
-  // lines 2 to 10 of the pseudocode
-  for r in sample(
-    prng,
-    g.num_vertices as usize,
-    g.config.num_searchers as usize,
-  ) {
-    let r = r as u32;
-    let r_ext = g.mapping.int_to_ext(r);
-    let r_dist = (g.config.dist_fn)(&q, r_ext);
-    visited.insert(*r_ext);
-    visited_distances.insert(*r_ext, r_dist);
-    r_min_heap.push(Reverse(SearchResult::new(*r_ext, r_dist)));
-    match q_max_heap.peek() {
-      None => {
-        q_max_heap.push(SearchResult::new(*r_ext, r_dist));
-        // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
-        // We are skipping it here since we did it above.
-      }
-      Some(f) => {
-        if r_dist < f.dist || q_max_heap.len() < k {
-          q_max_heap.push(SearchResult::new(*r_ext, r_dist));
-        }
-      }
-    }
-  }
-
-  // lines 11 to 27 of the pseudocode
-  while r_min_heap.len() > 0 {
-    while q_max_heap.len() > k {
-      q_max_heap.pop();
-    }
-
-    let Reverse(sr) = r_min_heap.pop().unwrap();
-    let &f = { q_max_heap.peek().unwrap() };
-    let sr_int = g.mapping.ext_to_int(&sr.id);
-    if sr.dist > f.dist {
-      break;
-    }
-
-    let mut r_nbrs = g.backpointers[*sr_int as usize].clone();
-    for (nbr, _, _) in g.get_edges(*sr_int).iter() {
-      r_nbrs.insert(*nbr);
-    }
-
-    for e in r_nbrs.iter() {
-      let e_ext = g.mapping.int_to_ext(e);
-      if !visited.contains(&e_ext) {
-        visited.insert(*e_ext);
-        let e_dist = (g.config.dist_fn)(&q, e_ext);
-        let f_dist = (g.config.dist_fn)(&q, &f.id);
-        visited_distances.insert(*e_ext, e_dist);
-        if e_dist < f_dist || q_max_heap.len() < k {
-          q_max_heap.push(SearchResult::new(*e_ext, e_dist));
-          r_min_heap.push(Reverse(SearchResult::new(*e_ext, e_dist)));
-        }
-      }
-    }
-  }
-
-  SearchResults {
-    nearest_neighbors_max_dist_heap: q_max_heap,
-    visited_nodes: visited,
-    visited_node_distances_to_q: visited_distances,
-  }
 }
 
 /// Constructs an exact k-nn graph on the given IDs. O(n^2).
@@ -761,110 +797,6 @@ fn apply_lgd<T, S: BuildHasher + Clone>(
 ) -> () {
   unimplemented!()
 }
-
-// TODO: just rename insert_approx to insert?
-
-/// Inserts a new data point into the graph. The graph must not be full.
-/// Optionally performs restricted recursive neighborhood propagation and
-/// lazy graph diversification. These options are set when the graph is
-/// constructed.
-///
-/// This is equivalent to one iteration of Algorithm 3 in
-/// "Approximate k-NN Graph Construction: A Generic Online Approach".
-pub fn insert_approx<
-  T: Copy + Eq + Ord + std::hash::Hash,
-  S: BuildHasher + Clone,
-  R: RngCore,
->(
-  g: &mut DenseKNNGraph<T, S>,
-  q: T,
-  prng: &mut R,
-) -> () {
-  //TODO: return the index of the new data point
-  let SearchResults {
-    nearest_neighbors_max_dist_heap,
-    visited_nodes,
-    visited_node_distances_to_q,
-  } = knn_beam_search(g, q, g.config.num_searchers as usize, prng);
-
-  if g.config.use_rrnp {
-    rrnp(
-      g,
-      &nearest_neighbors_max_dist_heap,
-      &visited_nodes,
-      &visited_node_distances_to_q,
-    );
-  } else {
-    let (neighbors, dists) = nearest_neighbors_max_dist_heap
-      .iter()
-      .map(|sr| (g.mapping.ext_to_int(&sr.id), sr.dist))
-      .unzip();
-    let q_int = g.mapping.insert(q);
-    g.insert_vertex(q_int, neighbors, dists);
-
-    for r in &visited_nodes {
-      g.insert_edge_if_closer(
-        *g.mapping.ext_to_int(&r),
-        q_int,
-        visited_node_distances_to_q[&r],
-      );
-    }
-  }
-
-  if g.config.use_lgd {
-    apply_lgd(
-      g,
-      &nearest_neighbors_max_dist_heap,
-      &visited_nodes,
-      &visited_node_distances_to_q,
-    );
-  }
-}
-
-// TODO: wrap db and dist_fn in a struct and make this a method on it.
-// TODO: avoid passing db at all? We need to support incremental data.
-// TODO: really need a solution here. The std::ops::Index thing doesn't work
-// because it forces the user to return references to objects, which the
-// user may not have (what if the objects are ephemeral and the user wants to
-// avoid allocating them? What if you can compute distance as the object is
-// streamed over the network, so you never materialize the whole thing in
-// memory?) Requirements:
-// - Don't require the objects to be stored in memory. The user decides how to
-// fetch them to compute distance on them. Read from disk, network call, memory,
-// whatever the user wants.
-// - Don't force user to make a mapping from 0..n to the objects. The user's
-// objects might be identified by UUIDs, strings, whatever, on the user's side.
-// However, for memory efficiency, allow user to opt into using u32 ids.
-// - TODO: Make sure that this all works with deletion! Before deletion, we were
-//   assuming that our internal u32 ids pointed to the same object forever.
-//   Now we are assuming it could change, so if we pass the internal id to the
-//   user's callback, the user needs to make sure that they can handle it. BUT
-//   the catch is that *our code* will be assigning the internal id to the
-//   user's object. So we need to return the assigned id to the user, and the
-//   user needs to keep track of the internal id -> object mapping on their
-//   side. This is really tricky for the user and a potential footgun, so we
-//   desperately need to expose a utility that handles this for the user.
-//   TODO: make sure that the API's use of internal ids makes sense given
-//   deletion. Some parts assume the user is assigning internal ids, other parts
-//   assume the library is. This is very very bad.
-//
-// Maybe the right solution is to generalize the graph type itself instead of
-// being hardcoded to u32s.
-//
-// Possible solution:
-// - Create an "easy mode" wrapper around DenseKNNGraph that allows the user to
-// insert any type they want, and we maintain the mapping from that type to u32.
-// As with any container, whether the user stores IDs or objects themselves is
-// none of our business as the implementor of the container. We can defer this
-// one until later with no problems.
-// - Eliminate the db type. If the user needs to carry around more info, their
-// distance fn can be a closure. "Easy mode" wrapper would have the user create
-// a distance function that takes their type as input, we do the mapping to/from
-// u32 behind-the-scenes.
-// - For exhaustive_knn_graph, the contract is that dist_fn will be called with
-// indices 0..n so dist_fn must be able to give answers over that range. Again,
-// an easy mode wrapper can hide this from the user by mapping their stuff to
-// 0..n.
 
 #[cfg(test)]
 mod tests {
@@ -970,7 +902,7 @@ mod tests {
     let SearchResults {
       nearest_neighbors_max_dist_heap,
       ..
-    } = knn_beam_search(&g, 1, 2, &mut prng);
+    } = g.query(1, 2, &mut prng);
     assert_eq!(
       nearest_neighbors_max_dist_heap
         .iter()
@@ -1033,7 +965,7 @@ mod tests {
   }
 
   #[test]
-  fn test_insert_approx() {
+  fn test_insert() {
     let db = vec![
       [1f32],
       [2f32],
@@ -1057,13 +989,13 @@ mod tests {
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
       println!("doing {}", i);
-      insert_approx(&mut g, i, &mut prng);
+      g.insert(i, &mut prng);
     }
     g.consistency_check();
   }
 
   // #[test]
-  // fn test_insert_approx_from_empty() {
+  // fn test_insert_from_empty() {
   //   let db = vec![
   //     [1f32],
   //     [2f32],
@@ -1085,7 +1017,7 @@ mod tests {
   //     nohash_hasher::BuildNoHashHasher::default(),
   //   );
   //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  //   insert_approx(&mut g, 0, &mut prng);
+  //   g.insert(0, &mut prng);
 
   //   g.consistency_check();
   // }

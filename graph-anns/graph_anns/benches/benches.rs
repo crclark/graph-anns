@@ -81,7 +81,7 @@ fn bench_insert_one(c: &mut Criterion) {
       let mk_g = || construct_graph(n, n + 1);
       b.iter_batched(
         mk_g,
-        |mut g| insert_approx(&mut g, n, &mut prng),
+        |mut g| g.insert(n, &mut prng),
         BatchSize::SmallInput,
       )
     });
@@ -94,7 +94,7 @@ fn construct_graph_approx_iterative(n: u32) {
   let mut g: DenseKNNGraph<u32, NHH> =
     exhaustive_knn_graph(ids.iter().collect(), mk_config(n));
   for q in 50..n {
-    insert_approx(&mut g, q, &mut prng);
+    g.insert(q, &mut prng);
   }
 }
 
