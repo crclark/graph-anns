@@ -3,7 +3,7 @@ use std::hash::BuildHasherDefault;
 use std::iter::FromIterator;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use criterion::{BatchSize, BenchmarkId};
 
 extern crate graph_anns;
@@ -104,6 +104,7 @@ fn bench_construct_graph_approx_iterative(c: &mut Criterion) {
 
   let mut group = c.benchmark_group("construct_graph_approx_iterative");
   group.measurement_time(Duration::from_secs(60));
+  group.sampling_mode(SamplingMode::Flat);
 
   for n in [500, 1000, 10000, 1000_000].iter() {
     group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
@@ -114,8 +115,8 @@ fn bench_construct_graph_approx_iterative(c: &mut Criterion) {
 
 criterion_group!(
   benches,
-  // bench_construct_exhaustive_graph,
-  // bench_insert_one,
+  bench_construct_exhaustive_graph,
+  bench_insert_one,
   bench_construct_graph_approx_iterative
 );
 criterion_main!(benches);
