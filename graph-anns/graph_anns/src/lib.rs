@@ -1,12 +1,15 @@
 #![feature(total_cmp)]
 #![feature(is_sorted)]
+extern crate indexmap;
 extern crate nohash_hasher;
 extern crate rand;
 extern crate rand_xoshiro;
 extern crate tinyset;
 
-use nohash_hasher::IntMap;
+use indexmap::map::IndexMap;
+use nohash_hasher::BuildNoHashHasher;
 use rand::seq::index::sample;
+use rand::thread_rng;
 use rand::RngCore;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -39,6 +42,30 @@ const DEFAULT_LAMBDA: u8 = 0;
 //
 // We'd need to make this optional and benchmark carefully to verify that it
 // improves performance.
+//
+// test_delete below actually hits this edge case -- the graph is split into two
+// connected components, and so a search that starts in one component can
+// never reach the other. We are doing beam search from multiple starting points
+// and that should mitigate the issue, but it doesn't guarantee anything.
+// Ideally, we would ensure that the graph is always connected.
+//
+// One way to do this would be to maintain one special edge per node that points
+// to a nearby-ish neighbor with an additional property: all of these special
+// edges together form a path that touches each node in the graph once. In other
+// words, we maintain a permutation of the nodes to ensure that we always have
+// a path through all of the nodes.
+//
+// Problems with this idea:
+// 1. We would need to optimize the path to ensure that consecutive nodes are
+//   close to one another.
+// 2. Some consecutive nodes simply won't be very close no matter how we try.
+// 3. It may have unintended cosequences on the search performance.
+// 4. Internal implementation becomes even more complicated.
+//
+// What about other solutions? We could simply trust the beam search, and
+// recommend using a higher number of searchers. However, I suspect that this
+// permutation idea may even help search performance -- could long-range hops
+// move a searcher much closer to the target?
 
 // TODO: deletion. I think this is achievable. Tricky parts are:
 // 1. Backpointers. We need to update an unbounded number of referrers to the
@@ -100,7 +127,8 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
   /// The max number of vertices that can be inserted into the graph. Constant.
   pub capacity: u32,
   /// The number of approximate nearest neighbors to store for each inserted
-  /// element. This is a constant.
+  /// element. This is a constant. Each graph node is guaranteed to always have
+  /// exactly this out-degree.
   pub out_degree: u32,
   /// Number of simultaneous searchers in the beam search.
   pub num_searchers: u32,
@@ -221,7 +249,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
 pub struct InternalExternalIDMapping<T, S: BuildHasher> {
   pub capacity: u32,
   // TODO: using a vec might be faster.
-  pub internal_to_external_ids: IntMap<u32, T>,
+  pub internal_to_external_ids: IndexMap<u32, T, BuildNoHashHasher<u32>>,
   pub external_to_internal_ids: HashMap<T, u32, S>,
   // TODO: we may also need a fast is_deleted check for internal ids.
   pub deleted: Vec<u32>,
@@ -231,10 +259,11 @@ impl<T: Copy + Eq + std::hash::Hash, S: BuildHasher>
   InternalExternalIDMapping<T, S>
 {
   fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
-    let internal_to_external_ids = IntMap::<u32, T>::with_capacity_and_hasher(
-      capacity as usize,
-      nohash_hasher::BuildNoHashHasher::default(),
-    );
+    let internal_to_external_ids =
+      IndexMap::<u32, T, BuildNoHashHasher<u32>>::with_capacity_and_hasher(
+        capacity as usize,
+        nohash_hasher::BuildNoHashHasher::default(),
+      );
     let external_to_internal_ids =
       HashMap::with_capacity_and_hasher(capacity as usize, hash_builder);
 
@@ -303,6 +332,21 @@ fn convert_bruteforce_to_dense<
   exhaustive_knn_graph(ids, config)
 }
 
+fn convert_dense_to_bruteforce<
+  'a,
+  T: Copy + Eq + std::hash::Hash,
+  S: BuildHasher + Clone,
+>(
+  g: &mut DenseKNNGraph<'a, T, S>,
+) -> BruteForceKNN<'a, T> {
+  let mut contents = HashSet::new();
+  let distance = g.config.dist_fn;
+  for (ext_id, _) in g.mapping.external_to_internal_ids.drain() {
+    contents.insert(ext_id);
+  }
+  BruteForceKNN { contents, distance }
+}
+
 /// Switches from brute-force to approximate nearest neighbor search based on
 /// the number of inserted elements.
 pub enum KNN<'a, T, S: BuildHasher + Clone> {
@@ -334,7 +378,24 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   }
 
   fn delete(&mut self, x: T) -> () {
-    unimplemented!()
+    match self {
+      KNN::Small { g, .. } => {
+        g.delete(x);
+      }
+      KNN::Large(g) => {
+        if g.mapping.external_to_internal_ids.len()
+          == g.config.out_degree as usize + 1
+        {
+          let config = g.config.clone();
+          let mut small_g = convert_dense_to_bruteforce(g);
+          small_g.delete(x);
+          *self = KNN::Small {
+            g: small_g,
+            config: config,
+          };
+        }
+      }
+    }
   }
 
   fn query<R: RngCore>(
@@ -350,6 +411,29 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   }
 }
 
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
+  KNN<'a, T, S>
+{
+  pub fn new(config: KNNGraphConfig<'a, T, S>) -> KNN<'a, T, S> {
+    KNN::Small {
+      g: BruteForceKNN::new(config.dist_fn),
+      config,
+    }
+  }
+
+  /// Panics if graph structure is internally inconsistent. Used for testing.
+  pub fn debug_consistency_check(&self) -> () {
+    match self {
+      KNN::Small { .. } => {
+        return;
+      }
+      KNN::Large(g) => {
+        g.consistency_check();
+      }
+    }
+  }
+}
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
@@ -361,9 +445,9 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// more memory-efficient adjacency list... which may be a decisive factor.
   pub mapping: InternalExternalIDMapping<T, S>,
   /// n, the current number of vertices in the graph. The valid indices of the
-  /// graph are 0 to n-1.
+  /// graph are given by self.mapping.internal_to_external_ids.keys().
   pub num_vertices: u32,
-  /// The underlying buffer of num_vertices*out_degree neighbor information.
+  /// The underlying buffer of capacity*out_degree neighbor information.
   /// An adjacency list of (node id, distance, lambda crowding factor
   /// (not yet implemented, always zero)).
   /// Use with caution.
@@ -383,14 +467,19 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
 {
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
-  fn empty(config: KNNGraphConfig<'a, T, S>) -> DenseKNNGraph<'a, T, S> {
+  // TODO: no pub, not usable
+  pub fn empty(config: KNNGraphConfig<'a, T, S>) -> DenseKNNGraph<'a, T, S> {
     let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
       config.capacity,
       config.build_hasher.clone(),
     );
 
-    let edges =
-      Vec::with_capacity(config.capacity as usize * config.out_degree as usize);
+    // TODO: splitting this into three vecs would allow at least the first one
+    // to specialize to calloc and potentially be a lot faster.
+    let edges = vec![
+      (0, 0.0, DEFAULT_LAMBDA);
+      config.capacity as usize * config.out_degree as usize
+    ];
 
     let mut backpointers = Vec::with_capacity(config.capacity as usize);
 
@@ -414,9 +503,18 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 
   /// Get the neighbors of u and their distances. Panics if index
-  /// >= num_vertices.
+  /// >= capacity or does not exist.
   pub fn get_edges(&self, index: u32) -> &[(u32, f32, u8)] {
-    assert!(index < self.num_vertices);
+    assert!(
+      index < self.config.capacity,
+      "index {} out of bounds",
+      index
+    );
+    assert!(
+      self.mapping.internal_to_external_ids.contains_key(&index),
+      "index {} does not exist in internal ids",
+      index
+    );
 
     let i = index * self.config.out_degree;
     let j = i + self.config.out_degree;
@@ -427,9 +525,11 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
     self.get_edges(index).iter().map(|e| e.0).collect()
   }
 
-  /// Get the neighbors of u and their distances. Panics if index >= num_vertices.
+  /// Get the neighbors of u and their distances. Panics if index
+  /// >= capacity or does not exist.
   fn get_edges_mut(&mut self, index: u32) -> &mut [(u32, f32, u8)] {
-    assert!(index < self.num_vertices);
+    assert!(index < self.config.capacity);
+    assert!(self.mapping.internal_to_external_ids.contains_key(&index));
 
     let i = index * self.config.out_degree;
     let j = i + self.config.out_degree;
@@ -439,6 +539,37 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
   fn sort_edges(&mut self, index: u32) {
     let edges = self.get_edges_mut(index);
     edges.sort_by(|a, b| a.1.total_cmp(&b.1));
+  }
+
+  /// Get distance in terms of two internal ids. Panics if internal ids do not
+  /// exist in the mapping.
+  fn dist_int(&self, int_id1: u32, int_id2: u32) -> f32 {
+    let ext_id1 = self.mapping.internal_to_external_ids.get(&int_id1).unwrap();
+    let ext_id2 = self.mapping.internal_to_external_ids.get(&int_id2).unwrap();
+    (self.config.dist_fn)(ext_id1, ext_id2)
+  }
+
+  /// Replace the edge (u,v) with a new edge (u,w)
+  /// DOES NOT update v or w's backpointers
+  fn replace_edge_no_backptr_update(
+    &mut self,
+    u: u32,
+    v: u32,
+    w: u32,
+    u_w_dist: f32,
+  ) {
+    let u_edges = self.get_edges_mut(u);
+    for (edge_ix, edge_dist, edge_lambda) in u_edges.iter_mut() {
+      if *edge_ix == v {
+        *edge_ix = w;
+        *edge_dist = u_w_dist;
+        *edge_lambda = DEFAULT_LAMBDA;
+      }
+    }
+
+    // TODO: the list is all sorted except for the new element; we could optimize
+    // this.
+    self.sort_edges(u);
   }
 
   /// Creates an edge from `from` to `to` if the distance `dist` between them is
@@ -478,8 +609,8 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let od = self.config.out_degree as usize;
     assert!(nbrs.len() == od && dists.len() == od);
 
-    for (nbr, dist) in nbrs.iter().zip(dists) {
-      self.edges.push((*nbr, dist, DEFAULT_LAMBDA));
+    for ((edge_ix, nbr), dist) in nbrs.iter().enumerate().zip(dists) {
+      self.edges[u as usize * od + edge_ix] = (*nbr, dist, DEFAULT_LAMBDA);
       let s = &mut self.backpointers[*nbr as usize];
       s.insert(u);
     }
@@ -490,34 +621,36 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
   pub fn debug_print(&self) {
     println!("### Adjacency list (index, distance, lambda)");
-    for i in 0..self.num_vertices {
+    for i in self.mapping.internal_to_external_ids.keys() {
       println!("Node {}", i);
-      println!("{:#?}", self.get_edges(i));
+      println!("{:#?}", self.get_edges(*i));
     }
     println!("### Backpointers");
-    println!("{:#?}", self.backpointers);
+    for i in self.mapping.internal_to_external_ids.keys() {
+      println!("Node {} {:#?}", i, self.backpointers[*i as usize]);
+    }
   }
 
   /// Panics if graph is internally inconsistent.
   fn consistency_check(&self) {
     if self.edges.len()
-      != self.num_vertices as usize * self.config.out_degree as usize
+      != self.config.capacity as usize * self.config.out_degree as usize
     {
       panic!(
-        "edges.len() is not equal to num_vertices * out_degree. {} != {} * {}",
+        "edges.len() is not equal to capacity * out_degree. {} != {} * {}",
         self.edges.len(),
-        self.num_vertices,
+        self.config.capacity,
         self.config.out_degree
       );
     }
 
-    for i in 0..self.num_vertices {
-      for (nbr, _, _) in self.get_edges(i).iter() {
-        if *nbr == i {
+    for i in self.mapping.internal_to_external_ids.keys() {
+      for (nbr, _, _) in self.get_edges(*i).iter() {
+        if *nbr == *i {
           panic!("Self loop at node {}", i);
         }
         let nbr_backptrs = &self.backpointers[*nbr as usize];
-        if !nbr_backptrs.contains(i) {
+        if !nbr_backptrs.contains(*i) {
           panic!(
             "Vertex {} links to {} but {}'s backpointers don't include {}!",
             i, nbr, nbr, i
@@ -525,12 +658,58 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
         }
       }
 
-      assert!(self.get_edges(i).is_sorted_by_key(|e| e.1));
+      assert!(self.get_edges(*i).is_sorted_by_key(|e| e.1));
 
-      for referrer in self.backpointers[i as usize].iter() {
+      for referrer in self.backpointers[*i as usize].iter() {
         assert!(self.debug_get_neighbor_indices(referrer).contains(&i));
       }
     }
+  }
+
+  fn exists_edge(&self, u: u32, v: u32) -> bool {
+    for (w, _, _) in self.get_edges(u).iter() {
+      if v == *w {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // TODO: expose an interface where the user provides one of their ids already
+  // in the database and we
+  // return n approximate nearest neighbors very fast by using upper bounds on
+  // distance in the same way as two_hop_neighbors_and_dist_upper_bounds. Of
+  // course, for best results we should be unsharded.
+
+  // TODO: does our new API even support out-of-db queries effectively? The
+  // distance function the user provides takes two ids as input. Make an example
+  // of inserting a few vectors and then querying for neigbors to a novel vector
+  // that doesn't exist in the database.
+
+  // TODO: k-nn descent helper so we can optimize the graph with idle CPU.
+
+  /// Returns up to limit neighbors that are at 2 hops away from int_id, and an
+  /// upper bound on the distance of each (computed as dist(u,v) + dist(v,w)).
+  /// Computing this upper bound is very cheap, so it is returned directly.
+  /// Up to k*k ids will be returned.
+  /// If there exists a path of length 1 and a path of length 2 to the neighbor,
+  /// it will *not* be returned -- the goal is to return neighbors of neighbors.
+  fn two_hop_neighbors_and_dist_upper_bounds(
+    &self,
+    int_id: u32,
+  ) -> BinaryHeap<Reverse<SearchResult<u32>>> {
+    let mut ret: BinaryHeap<Reverse<SearchResult<u32>>> = BinaryHeap::new();
+    for (v, v_dist, _) in self.get_edges(int_id).iter() {
+      for (w, w_dist, _) in self.get_edges(*v).iter() {
+        if !self.exists_edge(int_id, *w) {
+          ret.push(Reverse(SearchResult {
+            id: *w,
+            dist: v_dist + w_dist,
+          }));
+        }
+      }
+    }
+    return ret;
   }
 }
 
@@ -586,8 +765,116 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     }
   }
 
-  fn delete(&mut self, x: T) -> () {
-    todo!()
+  fn delete(&mut self, ext_id: T) -> () {
+    assert!(self.num_vertices + 1 > self.config.out_degree);
+    match self.mapping.external_to_internal_ids.get(&ext_id) {
+      None => {
+        // TODO: return a warning?
+        return;
+      }
+      Some(&int_id) => {
+        for referrer in self
+          .backpointers
+          .get(int_id as usize)
+          .unwrap()
+          .clone() // TODO: remove clone
+          .iter()
+        {
+          // For each node currently pointing to int_id, we need to find a
+          // new nearest neighbor to
+          // replace int_id. We can be inspired by  k-nn descent: neighbors of
+          // neighbors are also close to us, so let's use them as candidates.
+          // For speed, we will insert the neighbor of neighbor with the least
+          // upper bound distance, computed as dist(u,v) + dist(v,w). This
+          // requires the triangle inequality to hold for the user's metric
+          let referrer_nbrs: HashSet<u32> =
+            self.get_edges(referrer).iter().map(|x| x.0).collect();
+          let mut referrer_nbrs_of_nbrs =
+            self.two_hop_neighbors_and_dist_upper_bounds(referrer);
+
+          let (new_referent, dist_referrer_new_referent) = loop {
+            match referrer_nbrs_of_nbrs.pop() {
+              None => {
+                // If we reach this case, we're in a small connected component
+                // and we can't find any neighbors of neighbors who aren't
+                // already neighbors or ourself.
+                // Instead of looking for neighbors of neighbors, we simply
+                // do a search.
+                let SearchResults {
+                  nearest_neighbors_max_dist_heap,
+                  ..
+                } = self.query(
+                  *self.mapping.int_to_ext(referrer),
+                  // we need to find one new node who isn't a neighbor, the
+                  // node being deleted, or referrer itself, so we search for
+                  // one more than that number.
+                  self.config.out_degree as usize + 3,
+                  &mut thread_rng(),
+                );
+
+                let nearest_neighbor = nearest_neighbors_max_dist_heap
+                  .into_sorted_vec()
+                  .iter()
+                  .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
+                  .filter(|(res_int_id, _dist)| {
+                    **res_int_id != int_id
+                      && **res_int_id != referrer
+                      && !referrer_nbrs.contains(&res_int_id)
+                  })
+                  .next();
+
+                match nearest_neighbor {
+                  None => panic!(
+                    "No replacement neighbors found -- is the graph too small?"
+                  ),
+                  Some((id, dist)) => {
+                    break (*id, dist);
+                  }
+                }
+              }
+              Some(Reverse(SearchResult { id, .. })) => {
+                if id != int_id
+                  && id != referrer
+                  && !referrer_nbrs.contains(&id)
+                {
+                  let dist = self.dist_int(referrer, id);
+                  break (id, dist);
+                }
+              }
+            }
+          };
+
+          self.replace_edge_no_backptr_update(
+            referrer,
+            int_id,
+            new_referent,
+            dist_referrer_new_referent,
+          );
+
+          // Insert referrer into the backpointers of the new referent.
+          let new_referent_backpointers =
+            self.backpointers.get_mut(new_referent as usize).unwrap();
+          new_referent_backpointers.insert(referrer);
+        }
+
+        // Remove backpointers for all nodes the deleted node was pointing to.
+        let nbrs: Vec<u32> =
+          self.get_edges(int_id).iter().map(|x| x.0).collect();
+        for nbr in nbrs {
+          let nbr_backpointers =
+            self.backpointers.get_mut(nbr as usize).unwrap();
+
+          nbr_backpointers.remove(int_id);
+        }
+
+        // Reset backpointers for the deleted node.
+        let backpointers = self.backpointers.get_mut(int_id as usize).unwrap();
+        *backpointers = SetU32::default();
+        self.mapping.delete(&ext_id);
+        self.num_vertices -= 1;
+        return;
+      }
+    }
   }
 
   // TODO: return fewer than expected results if num_searchers or k is
@@ -598,6 +885,11 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
 
   // TODO: add summary statistics to SearchResults? min, max, mean distance of
   // visited nodes. Or just compute them in a more complex benchmark program.
+
+  // TODO: test that nearest neighbor search actually returns nearby neighbor
+  // on small graphs.
+
+  // TODO: wouldn't returning a min-dist heap be more useful?
 
   /// Perform beam search for the k nearest neighbors of a point q. Returns
   /// (nearest_neighbors_max_dist_heap, visited_nodes, visited_node_distances_to_q)
@@ -610,7 +902,6 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     prng: &mut R,
   ) -> SearchResults<T> {
     assert!(self.config.num_searchers <= self.num_vertices);
-    assert!(max_results <= self.num_vertices as usize);
     let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
     let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
       BinaryHeap::new();
@@ -618,13 +909,16 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     let mut visited_distances: HashMap<T, f32> = HashMap::default();
 
     // lines 2 to 10 of the pseudocode
-    for r in sample(
+    for r_index_into_hashmap in sample(
       prng,
-      self.num_vertices as usize,
+      self.mapping.internal_to_external_ids.len(),
       self.config.num_searchers as usize,
     ) {
-      let r = r as u32;
-      let r_ext = self.mapping.int_to_ext(r);
+      let (r, r_ext) = self
+        .mapping
+        .internal_to_external_ids
+        .get_index(r_index_into_hashmap)
+        .unwrap();
       let r_dist = (self.config.dist_fn)(&q, r_ext);
       visited.insert(*r_ext);
       visited_distances.insert(*r_ext, r_dist);
@@ -743,7 +1037,7 @@ pub fn exhaustive_knn_graph<
   let n = ids.len();
   // TODO: return Either
   if config.out_degree >= n as u32 {
-    panic!("k must be less than n");
+    panic!("out_degree must be less than the input ids");
   }
 
   let mut g: DenseKNNGraph<T, S> = DenseKNNGraph::empty(config.clone());
@@ -763,9 +1057,10 @@ pub fn exhaustive_knn_graph<
         knn.pop();
       }
     }
-    while knn.len() > 0 {
+    for edge_ix in 0..config.out_degree as usize {
       let SearchResult { id, dist } = knn.pop().unwrap();
-      g.edges.push((id, dist, DEFAULT_LAMBDA));
+      g.edges[(i as usize * config.out_degree as usize + edge_ix)] =
+        (id, dist, DEFAULT_LAMBDA);
       let s = &mut g.backpointers[id as usize];
       s.insert(i);
     }
@@ -918,6 +1213,14 @@ mod tests {
     config.out_degree = 2;
     let mut g: DenseKNNGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
       DenseKNNGraph::empty(config);
+    // NOTE:: g.insert_vertex() calls get_edges_mut which asserts that the
+    // internal id is in the mapping. g.mapping.insert() assigns internal ids in
+    // order starting from 0, so we are inserting 3 unused u32 external ids,
+    // 0,1,2 which get mapped to internal ids 0,1,2. Annoying and unclear, but
+    // necessary at the moment.
+    g.mapping.insert(0);
+    g.mapping.insert(1);
+    g.mapping.insert(2);
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -951,6 +1254,12 @@ mod tests {
     let mut config = mk_config(3, &|&x, &y| 1.0);
     config.out_degree = 1;
     let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(config);
+
+    // see note in test_insert_vertex
+    g.mapping.insert(0);
+    g.mapping.insert(1);
+    g.mapping.insert(2);
+
     g.insert_vertex(0, vec![2], vec![2.0]);
     g.insert_vertex(1, vec![2], vec![1.0]);
     g.insert_vertex(2, vec![1], vec![1.0]);
@@ -994,31 +1303,77 @@ mod tests {
     g.consistency_check();
   }
 
-  // #[test]
-  // fn test_insert_from_empty() {
-  //   let db = vec![
-  //     [1f32],
-  //     [2f32],
-  //     [3f32],
-  //     [10f32],
-  //     [11f32],
-  //     [12f32],
-  //     [18f32],
-  //     [19f32],
-  //     [20f32],
-  //     [21f32],
-  //     [22f32],
-  //   ];
-  //   let dist_fn = &|x: &u32, y: &u32| {
-  //     sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
-  //   };
-  //   let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(
-  //     mk_config(10, dist_fn),
-  //     nohash_hasher::BuildNoHashHasher::default(),
-  //   );
-  //   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  //   g.insert(0, &mut prng);
+  #[test]
+  fn test_insert_from_empty() {
+    let db = vec![
+      [1f32],
+      [2f32],
+      [3f32],
+      [10f32],
+      [11f32],
+      [12f32],
+      [18f32],
+      [19f32],
+      [20f32],
+      [21f32],
+      [22f32],
+    ];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut g: KNN<u32, NHH> = KNN::new(mk_config(10, dist_fn));
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    g.insert(0, &mut prng);
 
-  //   g.consistency_check();
-  // }
+    g.debug_consistency_check();
+  }
+
+  #[test]
+  fn test_delete() {
+    let db: Vec<[i32; 1]> = vec![[1], [2], [3], [10], [11], [12]];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut config = mk_config(10, dist_fn);
+    config.out_degree = 2;
+    let mut g: DenseKNNGraph<u32, NHH> =
+      exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
+    g.delete(3);
+    g.consistency_check();
+  }
+
+  #[test]
+  fn test_delete_large() {
+    let db: Vec<[i32; 1]> = vec![
+      [1],
+      [2],
+      [3],
+      [4],
+      [5],
+      [6],
+      [7],
+      [8],
+      [9],
+      [10],
+      [11],
+      [12],
+      [13],
+      [14],
+      [15],
+      [16],
+    ];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut config = mk_config(30, dist_fn);
+    config.out_degree = 5;
+    let ids = (0u32..16).collect::<Vec<_>>();
+    let mut g: DenseKNNGraph<u32, NHH> =
+      exhaustive_knn_graph(ids.iter().collect(), config);
+    g.consistency_check();
+    g.delete(7);
+    g.delete(15);
+    g.delete(0);
+    g.consistency_check();
+  }
 }

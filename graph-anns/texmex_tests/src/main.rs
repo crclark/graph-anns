@@ -11,6 +11,7 @@ extern crate rand_xoshiro;
 extern crate rayon;
 extern crate tinyset;
 
+use graph_anns::*;
 use nohash_hasher::{BuildNoHashHasher, NoHashHasher};
 use rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
@@ -261,23 +262,47 @@ fn pause() {
   let _ = stdin.read(&mut [0u8]).unwrap();
 }
 
+// fn main() {
+//   println!(
+//     "let's see how much memory a 1-billion element HashMap<u32, u32> takes."
+//   );
+//   // Answer: about 9.5GiB with NoHashHasher, 18.5 with default hasher (not sure why it makes a difference)
+
+//   let n = 1000_000_000;
+//   let start = Instant::now();
+//   let mut h =
+//     HashMap::<u32, u32, BuildHasherDefault<NoHashHasher<u32>>>::with_capacity_and_hasher(n, BuildNoHashHasher::default());
+
+//   for i in 0..n {
+//     h.insert(i as u32, i as u32);
+//     if i % 1000000 == 0 {
+//       println!("inserted {}", i);
+//     }
+//   }
+
+//   let duration = start.elapsed();
+
+//   println!("Time elapsed: {:?}", duration);
+//   pause();
+// }
+
 fn main() {
   println!(
-    "let's see how much memory a 1-billion element HashMap<u32, u32> takes."
+    "let's see how much memory a 1-billion element DenseKNNGraph takes."
   );
-  // Answer: about 9.5GiB with NoHashHasher, 18.5 with default hasher (not sure why it makes a difference)
+
+  // answer: 67.3G resident, took 211 seconds to allocate.
+
+  fn dist(x: &u32, y: &u32) -> f32 {
+    return 1.1f32;
+  }
 
   let n = 1000_000_000;
   let start = Instant::now();
-  let mut h =
-    HashMap::<u32, u32, BuildHasherDefault<NoHashHasher<u32>>>::with_capacity_and_hasher(n, BuildNoHashHasher::default());
-
-  for i in 0..n {
-    h.insert(i as u32, i as u32);
-    if i % 1000000 == 0 {
-      println!("inserted {}", i);
-    }
-  }
+  let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
+    nohash_hasher::BuildNoHashHasher::default();
+  let config = KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, false);
+  let mut g = DenseKNNGraph::empty(config);
 
   let duration = start.elapsed();
 
