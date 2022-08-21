@@ -301,7 +301,8 @@ fn main() {
   let start = Instant::now();
   let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
     nohash_hasher::BuildNoHashHasher::default();
-  let config = KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, false);
+  let config =
+    KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, 2, false);
   let mut g = DenseKNNGraph::empty(config);
 
   let duration = start.elapsed();

@@ -16,6 +16,7 @@ use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use tinyset::SetU32;
 
@@ -135,11 +136,13 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
   /// distance function. Must satisfy the criteria of a metric:
   /// https://en.wikipedia.org/wiki/Metric_(mathematics)
   pub dist_fn: &'a dyn Fn(&T, &T) -> f32,
+  pub build_hasher: S,
   /// Whether to use restricted recursive neighborhood propagation. This improves
   /// search speed, but decreases insertion throughput. TODO: verify that's
   /// true.
-  pub build_hasher: S,
   pub use_rrnp: bool,
+  /// Maximum recursion depth for RRNP. 2 is a good default.
+  pub rrnp_max_depth: u32,
   /// Whether to use lazy graph diversification. This improves search speed.
   /// TODO: parametrize this type so that the LGD vector is never allocated/
   /// takes no memory if this is set to false.
@@ -158,6 +161,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
     dist_fn: &'a dyn Fn(&T, &T) -> f32,
     build_hasher: S,
     use_rrnp: bool,
+    rrnp_max_depth: u32,
     use_lgd: bool,
   ) -> KNNGraphConfig<'a, T, S> {
     KNNGraphConfig::<'a, T, S> {
@@ -167,6 +171,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
       dist_fn,
       build_hasher,
       use_rrnp,
+      rrnp_max_depth,
       use_lgd,
     }
   }
@@ -251,7 +256,6 @@ pub struct InternalExternalIDMapping<T, S: BuildHasher> {
   // TODO: using a vec might be faster.
   pub internal_to_external_ids: IndexMap<u32, T, BuildNoHashHasher<u32>>,
   pub external_to_internal_ids: HashMap<T, u32, S>,
-  // TODO: we may also need a fast is_deleted check for internal ids.
   pub deleted: Vec<u32>,
 }
 
@@ -451,9 +455,7 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// An adjacency list of (node id, distance, lambda crowding factor
   /// (not yet implemented, always zero)).
   /// Use with caution.
-  /// Prefer to use indexing to access the neighbors of a vertex.
-  /// `g[i]` returns a slice of length `out_degree` of the neighbors of `i` along
-  /// with their distances from i.
+  /// Prefer to use get_edges to access the neighbors of a vertex.
   pub edges: Vec<(u32, f32, u8)>,
   /// Maintains an association between vertices and the vertices that link out to
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
@@ -607,7 +609,13 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
     assert!(self.num_vertices < self.config.capacity);
 
     let od = self.config.out_degree as usize;
-    assert!(nbrs.len() == od && dists.len() == od);
+    assert!(
+      nbrs.len() == od && dists.len() == od,
+      "nbrs.len() {}, out_degree {} dists.len() {}",
+      nbrs.len(),
+      od,
+      dists.len()
+    );
 
     for ((edge_ix, nbr), dist) in nbrs.iter().enumerate().zip(dists) {
       self.edges[u as usize * od + edge_ix] = (*nbr, dist, DEFAULT_LAMBDA);
@@ -711,6 +719,72 @@ impl<'a, T: Copy + Eq + std::hash::Hash, S: BuildHasher + Clone>
     }
     return ret;
   }
+
+  fn get_farthest_neighbor(
+    self: &DenseKNNGraph<'a, T, S>,
+    int_id: u32,
+  ) -> (u32, f32) {
+    let last_ix = self.config.out_degree - 1;
+    let (f, dist, _) = self.get_edges(int_id)[last_ix as usize];
+    (f, dist).clone()
+  }
+
+  fn in_and_out_neighbors(
+    self: &DenseKNNGraph<'a, T, S>,
+    int_id: u32,
+  ) -> Vec<(u32, f32)> {
+    let mut ret = Vec::new();
+    for (w, dist, _) in self.get_edges(int_id).iter() {
+      ret.push((*w, dist.clone()));
+    }
+    for w in self.backpointers[int_id as usize].iter() {
+      let dist = self
+        .get_edges(w)
+        .iter()
+        .filter(|e| e.0 == int_id)
+        .next()
+        .unwrap()
+        .1;
+      ret.push((w, dist.clone()));
+    }
+    ret
+  }
+
+  /// Perform RRNP w.r.t. a newly-inserted element q, given the results of
+  /// searching for q in the graph. This implements lines 10 to 24 of algorithm 3
+  /// in the paper. A small difference is that I pulled the loop `while |W| > 0`
+  /// outside of the `for each r in V` loop. That should have no effect on the
+  /// behavior, but it makes things more readable.
+  fn rrnp(
+    self: &mut DenseKNNGraph<'a, T, S>,
+    q: T,
+    q_int: u32,
+    visited_nodes: &HashSet<T>,
+    visited_nodes_distance_to_q: &HashMap<T, f32>,
+  ) -> () {
+    let mut w = VecDeque::new();
+    for r in visited_nodes {
+      w.push_back((*r, 0, visited_nodes_distance_to_q.get(r).unwrap()));
+    }
+
+    let mut already_rrnped = HashSet::new();
+
+    while w.len() > 0 {
+      let (s, depth, dist_s_q) = w.pop_front().unwrap();
+      let s_int = self.mapping.ext_to_int(&s);
+      let (f, dist_s_f) = self.get_farthest_neighbor(*s_int);
+      if depth < self.config.rrnp_max_depth && dist_s_q < &dist_s_f {
+        for (e, _) in self.in_and_out_neighbors(*s_int) {
+          let e_ext = self.mapping.int_to_ext(e);
+          if !already_rrnped.contains(&e) && !visited_nodes.contains(&e_ext) {
+            already_rrnped.insert(e);
+            let dist_e_q = (self.config.dist_fn)(&e_ext, &q);
+            self.insert_edge_if_closer(e, q_int, dist_e_q);
+          }
+        }
+      }
+    }
+  }
 }
 
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
@@ -729,30 +803,24 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       nearest_neighbors_max_dist_heap,
       visited_nodes,
       visited_node_distances_to_q,
-    } = self.query(q, self.config.num_searchers as usize, prng);
+    } = self.query(q, self.config.out_degree as usize, prng);
 
-    if self.config.use_rrnp {
-      rrnp(
-        self,
-        &nearest_neighbors_max_dist_heap,
-        &visited_nodes,
-        &visited_node_distances_to_q,
+    let (neighbors, dists) = nearest_neighbors_max_dist_heap
+      .iter()
+      .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
+      .unzip();
+    let q_int = self.mapping.insert(q);
+    self.insert_vertex(q_int, neighbors, dists);
+
+    for r in &visited_nodes {
+      self.insert_edge_if_closer(
+        *self.mapping.ext_to_int(&r),
+        q_int,
+        visited_node_distances_to_q[&r],
       );
-    } else {
-      let (neighbors, dists) = nearest_neighbors_max_dist_heap
-        .iter()
-        .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
-        .unzip();
-      let q_int = self.mapping.insert(q);
-      self.insert_vertex(q_int, neighbors, dists);
-
-      for r in &visited_nodes {
-        self.insert_edge_if_closer(
-          *self.mapping.ext_to_int(&r),
-          q_int,
-          visited_node_distances_to_q[&r],
-        );
-      }
+    }
+    if self.config.use_rrnp {
+      self.rrnp(q, q_int, &visited_nodes, &visited_node_distances_to_q);
     }
 
     if self.config.use_lgd {
@@ -1075,15 +1143,6 @@ pub fn exhaustive_knn_graph<
   g
 }
 
-fn rrnp<T, S: BuildHasher + Clone>(
-  _g: &mut DenseKNNGraph<T, S>,
-  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult<T>>,
-  _visited_nodes: &HashSet<T>,
-  _visited_nodes_distance_to_q: &HashMap<T, f32>,
-) -> () {
-  unimplemented!()
-}
-
 fn apply_lgd<T, S: BuildHasher + Clone>(
   _g: &mut DenseKNNGraph<T, S>,
   _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult<T>>,
@@ -1149,6 +1208,7 @@ mod tests {
     let out_degree = 5;
     let num_searchers = 5;
     let use_rrnp = false;
+    let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
     KNNGraphConfig::<'a, T, NHH> {
@@ -1158,6 +1218,7 @@ mod tests {
       dist_fn,
       build_hasher,
       use_rrnp,
+      rrnp_max_depth,
       use_lgd,
     }
   }
@@ -1376,4 +1437,37 @@ mod tests {
     g.delete(0);
     g.consistency_check();
   }
+
+  #[test]
+  fn test_use_rrnp() {
+    let db: Vec<[i32; 1]> = vec![[1], [2], [3], [10], [11], [12], [6]];
+    let dist_fn = &|x: &u32, y: &u32| {
+      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
+    };
+    let mut config = mk_config(10, dist_fn);
+    config.out_degree = 2;
+    config.use_rrnp = true;
+    let mut g: DenseKNNGraph<u32, NHH> =
+      exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
+    g.consistency_check();
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    g.insert(6, &mut prng);
+    g.consistency_check();
+  }
+
+  // #[test]
+  // fn test_realistic_usage() {
+  //   let dist_fn = &|x: &Vec<f32>, y: &Vec<f32>| sq_euclidean_faster(x, y);
+  //   let mut config = mk_config(100, &dist_fn);
+  //   config.out_degree = 5;
+  //   config.use_rrnp = true;
+  //   let mut g: DenseKNNGraph<Vec<f32>, NHH> = exhaustive_knn_graph(
+  //     vec![
+  //       &vec![1f32, 2f32, 3f32, 4f32],
+  //       &vec![2f32, 4f32, 5f32, 6f32],
+  //       &vec![3f32, 4f32, 5f32, 12f32],
+  //     ],
+  //     config,
+  //   );
+  // }
 }
