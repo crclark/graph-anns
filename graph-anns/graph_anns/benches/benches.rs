@@ -36,6 +36,7 @@ fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, NHH> {
   let out_degree = 5;
   let num_searchers = 5;
   let use_rrnp = false;
+  let rrnp_max_depth = 2;
   let use_lgd = false;
   let dist_fn = &hamming_dist;
   let build_hasher = nohash_hasher::BuildNoHashHasher::default();
@@ -46,6 +47,7 @@ fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, NHH> {
     dist_fn,
     build_hasher,
     use_rrnp,
+    rrnp_max_depth,
     use_lgd,
   }
 }
