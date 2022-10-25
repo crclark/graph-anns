@@ -12,13 +12,10 @@ extern crate rayon;
 extern crate tinyset;
 
 use graph_anns::*;
-use nohash_hasher::{BuildNoHashHasher, NoHashHasher};
-use rand_core::SeedableRng;
-use rand_xoshiro::Xoshiro256StarStar;
+use nohash_hasher::NoHashHasher;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
-use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::time::Instant;
 use std::{io, thread};

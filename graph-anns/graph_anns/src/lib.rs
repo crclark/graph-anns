@@ -42,7 +42,12 @@ const DEFAULT_LAMBDA: u8 = 0;
 // for requests.
 //
 // We'd need to make this optional and benchmark carefully to verify that it
-// improves performance.
+// improves performance -- the permutation and optimization of the permutation
+// should be two separate flags that are evaluated separately. Maybe a random
+// permutation is better, because it's essentially giving each searcher the
+// option to do something like a random restart at each iteration, and random
+// restarts are a well-known trick for improving local search algorithms such
+// as this one.
 //
 // test_delete below actually hits this edge case -- the graph is split into two
 // connected components, and so a search that starts in one component can
@@ -65,63 +70,8 @@ const DEFAULT_LAMBDA: u8 = 0;
 //
 // What about other solutions? We could simply trust the beam search, and
 // recommend using a higher number of searchers. However, I suspect that this
-// permutation idea may even help search performance -- could long-range hops
-// move a searcher much closer to the target?
-
-// TODO: deletion. I think this is achievable. Tricky parts are:
-// 1. Backpointers. We need to update an unbounded number of referrers to the
-//    deleted node.
-// 2. Edges. Once we have the referrers, we need to delete one of their edges
-//    that point to the deleted node. We can either replace it with a new edge,
-//    or allow the number of edges to drop below the configured out_degree.
-//    I am leaning toward replacement. We can use the set of neighbors of the
-//    deleted node as candidates for replacement.
-//    However, if we do want to allow the set of out-edges to shrink, we have
-//    some options.
-//    Because we're storing adjacency in a flat Vec, this requires us to
-//    1. Either wrap each element in `Option` or store the length of the edges
-//       subvector for each node (moving invalid items to the end). I am
-//       leaning toward the latter because it should optimize better -- if
-//       the user doesn't want deletion, we don't need to store the lengths at
-//       all, saving memory and reducing calculations.
-//    2. If the out-degree of the node has dropped to zero because of deletions,
-//       we need to fire off a search to find it a new set of `out_degree`
-//       neighbors. If we allow it to stay at zero, it will be unsearchable.
-// 3. Keeping track of which indices are currently deleted. This could be stored
-//    in a vector (pre-allocated to the length `capacity`). Respecting its
-//    contents is the hard part:
-//    1. On insertion of a new node, we need to reuse a deleted index if there
-//       are any.
-//    2. When searching, we can only start from non-deleted indices. If we have
-//       made a huge number of  deletions, simply finding non-deleted indices
-//       could become a slow linear search. Possible mitigation: predetermined,
-//       fixed starting points chosen with a pivot selection algorithm. But we
-//       would need to be careful about bounding the amount of time needed to
-//       update the set of pivots when deletions occur, which may just leave us
-//       back where we started, with the same problem of tracking which indices
-//       still exist.
-//       Another idea: in the basic algorithm, we need a random starting set,
-//       but each query could share the same random starting set... that
-//       suggests that we choose the random starting set once (or infrequently),
-//       then if an element of that set gets deleted, we search for a
-//       replacement. If we assume that element was chosen randomly, certainly
-//       one of its nearest neighbors would be a suitable replacement, right?
-// 4. Edge cases I can think of:
-//    1. An individual node has no neighbors left. Fix: search for new ones on
-//       deletion of its last neighbor.
-//    2. Graph gets broken into multiple components. Mitigation: multiple start
-//       points means by chance one should be in each component, unless some
-//       components are really small. Possible fix: the permutation path idea.
-//       See above.
-//    3. The number of nodes drops to 2, 1, or 0. I don't think 2 is an edge
-//       case, but it might be for some reason. 1 is definitely, because it hits
-//       edge case 1 above -- it will have no neighbors. 0 is a big edge case,
-//       because we need to make searches immediately fail with no results.
-// 5. The occlusion stuff needs to be updated based on deletion. This could be
-//    quite difficult, but I think the paper mentions some ideas.
-// 6. We could allow the user to enable deletion after the graph is constructed.
-//    It wouldn't be too hard -- just need to flip a bool and allocate some
-//    memory.
+// permutation idea may even help search performance -- see above note about
+// random restarts.
 
 #[derive(Clone, Copy)]
 pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
@@ -129,12 +79,16 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
   pub capacity: u32,
   /// The number of approximate nearest neighbors to store for each inserted
   /// element. This is a constant. Each graph node is guaranteed to always have
-  /// exactly this out-degree.
-  pub out_degree: u32,
+  /// exactly this out-degree. It's recommended to set this equal to the
+  /// intrinsic dimensionality of the data. Lower values hinder search performance
+  /// by preventing the search from moving in useful directions, higher values
+  /// hinder performance by incurring needless distance calls.
+  pub out_degree: u8,
   /// Number of simultaneous searchers in the beam search.
   pub num_searchers: u32,
   /// distance function. Must satisfy the criteria of a metric:
-  /// https://en.wikipedia.org/wiki/Metric_(mathematics)
+  /// https://en.wikipedia.org/wiki/Metric_(mathematics). Several internal
+  /// optimizations assume the triangle inequality holds.
   pub dist_fn: &'a dyn Fn(&T, &T) -> f32,
   pub build_hasher: S,
   /// Whether to use restricted recursive neighborhood propagation. This improves
@@ -144,7 +98,7 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
   /// Maximum recursion depth for RRNP. 2 is a good default.
   pub rrnp_max_depth: u32,
   /// Whether to use lazy graph diversification. This improves search speed.
-  /// TODO: parametrize this type so that the LGD vector is never allocated/
+  /// TODO: parametrize the graph type so that the LGD vector is never allocated/
   /// takes no memory if this is set to false.
   pub use_lgd: bool,
 }
@@ -156,7 +110,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
   /// Create a new KNNGraphConfig.
   pub fn new(
     capacity: u32,
-    out_degree: u32,
+    out_degree: u8,
     num_searchers: u32,
     dist_fn: &'a dyn Fn(&T, &T) -> f32,
     build_hasher: S,
@@ -181,7 +135,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
 
 pub trait NN<T> {
   // TODO: return types with error sums, more informative delete (did it exist?)
-  // etc.
+  // etc. Eliminate all panics that are not internal errors.
 
   // TODO: more functions in this interface.
 
@@ -249,7 +203,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
 /// within the core search functions to keep things fast and compact.
 /// Ideally, we should translate to and from user ids at the edges of
 /// performance-critical code. In practice, doing so may be difficult, since the
-/// user's distance callback is passed the user's IDs.
+/// user's distance callback is passed external ids (the user's IDs).
 #[derive(Debug)]
 pub struct InternalExternalIDMapping<T, S: BuildHasher> {
   pub capacity: u32,
@@ -454,8 +408,7 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// graph are given by self.mapping.internal_to_external_ids.keys().
   pub num_vertices: u32,
   /// The underlying buffer of capacity*out_degree neighbor information.
-  /// An adjacency list of (node id, distance, lambda crowding factor
-  /// (not yet implemented, always zero)).
+  /// An adjacency list of (node id, distance, lambda crowding factor.
   /// Use with caution.
   /// Prefer to use get_edges to access the neighbors of a vertex.
   pub edges: Vec<(u32, f32, u8)>,
@@ -493,10 +446,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
     let num_vertices = 0;
 
-    // TODO: expose as params once supported.
-    let use_rrnp = false;
-    let use_lgd = false;
-
     DenseKNNGraph {
       mapping,
       num_vertices,
@@ -520,8 +469,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       index
     );
 
-    let i = index * self.config.out_degree;
-    let j = i + self.config.out_degree;
+    let i = index * self.config.out_degree as u32;
+    let j = i + self.config.out_degree as u32;
     &self.edges[i as usize..j as usize]
   }
 
@@ -535,8 +484,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     assert!(index < self.config.capacity);
     assert!(self.mapping.internal_to_external_ids.contains_key(&index));
 
-    let i = index * self.config.out_degree;
-    let j = i + self.config.out_degree;
+    let i = index * self.config.out_degree as u32;
+    let j = i + self.config.out_degree as u32;
     &mut self.edges[i as usize..j as usize]
   }
 
@@ -603,8 +552,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
   // TODO: can we run k-nn descent on the graph whenever we have free cycles?
 
-  /// Insert a new vertex into the graph, given its k neighbors and their
-  /// distances. Panics if the graph is already full (num_vertices == capacity).
+  /// Insert a new vertex into the graph, with the given k neighbors and their
+  /// distances. Does not connect other vertices to this vertex.
+  /// Panics if the graph is already full (num_vertices == capacity).
   /// nbrs and dists must be equal to the out_degree of the graph.
   fn insert_vertex(&mut self, u: u32, nbrs: Vec<u32>, dists: Vec<f32>) {
     //TODO: replace all asserts with Either return values
@@ -713,7 +663,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       for (w, w_dist, _) in self.get_edges(*v).iter() {
         if !self.exists_edge(int_id, *w) {
           ret.push(Reverse(SearchResult {
-            id: *w,
+            item: *w,
             dist: v_dist + w_dist,
           }));
         }
@@ -790,9 +740,165 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       }
     }
   }
+
+  /// Return the average occlusion (lambda values) of the neighbors of the given
+  /// node. This is part of the lazy graph diversification algorithm. See the
+  /// paper for details. Returns infinity if LGD is disabled.
+  fn average_occlusion(&self, int_id: u32) -> f32 {
+    if !self.config.use_lgd {
+      return f32::INFINITY;
+    }
+    let mut sum = 0.0;
+    for (_, _, lambda) in self.get_edges(int_id).iter() {
+      sum += *lambda as f32;
+    }
+    sum / self.config.out_degree as f32
+  }
+
+  fn query_internal<R: RngCore>(
+    &self,
+    q: &T,
+    max_results: usize,
+    prng: &mut R,
+    ignore_occluded: bool,
+  ) -> SearchResults<T> {
+    assert!(self.config.num_searchers <= self.num_vertices);
+    let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
+    let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
+      BinaryHeap::new();
+    let mut visited = HashSet::<T>::new();
+    let mut visited_distances: HashMap<T, f32> = HashMap::default();
+
+    // Initialize our search with num_searchers initial points.
+    // lines 2 to 10 of the pseudocode
+    for r_index_into_hashmap in sample(
+      prng,
+      self.mapping.internal_to_external_ids.len(),
+      self.config.num_searchers as usize,
+    ) {
+      let (_r, r_ext) = self
+        .mapping
+        .internal_to_external_ids
+        .get_index(r_index_into_hashmap)
+        .unwrap();
+      let r_dist = (self.config.dist_fn)(&q, r_ext);
+      visited.insert(r_ext.clone());
+      visited_distances.insert(r_ext.clone(), r_dist);
+      r_min_heap.push(Reverse(SearchResult::new(r_ext.clone(), r_dist)));
+      match q_max_heap.peek() {
+        None => {
+          q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
+          // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
+          // We are skipping it here since we did it above.
+        }
+        Some(f) => {
+          if r_dist < f.dist || q_max_heap.len() < max_results {
+            q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
+          }
+        }
+      }
+    }
+
+    // The main search loop. While unvisited nodes exist in r_min_heap, keep
+    // searching.
+    // lines 11 to 27 of the pseudocode
+    while r_min_heap.len() > 0 {
+      while q_max_heap.len() > max_results {
+        q_max_heap.pop();
+      }
+
+      let Reverse(sr) = r_min_heap.pop().unwrap();
+      let f = { q_max_heap.peek().unwrap().clone() };
+      let sr_int = self.mapping.ext_to_int(&sr.item);
+      if sr.dist > f.dist {
+        break;
+      }
+
+      let mut r_nbrs = self.backpointers[*sr_int as usize].clone();
+      let average_lambda = self.average_occlusion(*sr_int);
+      for (nbr, _, lambda) in self.get_edges(*sr_int).iter() {
+        if ignore_occluded && *lambda as f32 >= average_lambda {
+          continue;
+        } else {
+          r_nbrs.insert(*nbr);
+        }
+      }
+
+      for e in r_nbrs.iter() {
+        let e_ext = self.mapping.int_to_ext(e);
+        if !visited.contains(&e_ext) {
+          visited.insert(e_ext.clone());
+          let e_dist = (self.config.dist_fn)(&q, e_ext);
+          let f_dist = (self.config.dist_fn)(&q, &f.item);
+          visited_distances.insert(e_ext.clone(), e_dist);
+          if e_dist < f_dist || q_max_heap.len() < max_results {
+            q_max_heap.push(SearchResult::new(e_ext.clone(), e_dist));
+            r_min_heap.push(Reverse(SearchResult::new(e_ext.clone(), e_dist)));
+          }
+        }
+      }
+    }
+
+    SearchResults {
+      nearest_neighbors_max_dist_heap: q_max_heap,
+      visited_nodes: visited,
+      visited_node_distances_to_q: visited_distances,
+    }
+  }
 }
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
+// NOTE: this abomination is necessary because I want helper functions that
+// return parts of the graph data structure, but the borrow checker is dumb.
+// This macro simply inlines get_edges_mut.
+// TODO: find a better solution.
+macro_rules! get_edges_mut_macro {
+  ($self:ident, $index:ident) => {
+    &mut $self.edges[($index as usize * $self.config.out_degree as usize)
+      ..$index as usize * $self.config.out_degree as usize
+        + $self.config.out_degree as usize]
+  };
+}
+
+fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>(
+  r_edges: &mut [(u32, f32, u8)],
+  mapping: &InternalExternalIDMapping<T, S>,
+  q_int: u32,
+  visited_node_distances_to_q: &HashMap<T, f32>,
+) {
+  let q_ix = r_edges.iter().position(|e| e.0 == q_int).unwrap();
+  let q_r_dist = r_edges[q_ix].1;
+
+  r_edges[q_ix].2 = DEFAULT_LAMBDA as u8;
+
+  for s_ix in 0..r_edges.len() {
+    let (s_int, s_r_dist, _) = r_edges[s_ix];
+    let s_ext = mapping.int_to_ext(s_int);
+    let s_q_dist = visited_node_distances_to_q.get(&s_ext);
+
+    match s_q_dist {
+      Some(s_q_dist) => {
+        // rule 1 from the paper
+        if s_r_dist < q_r_dist && s_q_dist >= &q_r_dist {
+          continue;
+        }
+        // rule 2 from the paper
+        else if s_r_dist < q_r_dist && s_q_dist < &q_r_dist {
+          r_edges[q_ix].2 += 1;
+        }
+        // rule 3 from the paper: s_r_dist > q_r_dist, q occludes s
+        else if s_q_dist < &s_r_dist {
+          r_edges[s_ix].2 += 1;
+        }
+      }
+
+      None => {
+        continue;
+      }
+    }
+  }
+}
+
+impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   for DenseKNNGraph<'a, T, S>
 {
   /// Inserts a new data point into the graph. The graph must not be full.
@@ -808,38 +914,34 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       nearest_neighbors_max_dist_heap,
       visited_nodes,
       visited_node_distances_to_q,
-    } = self.query(&q, self.config.out_degree as usize, prng);
+    } = self.query_internal(&q, self.config.out_degree as usize, prng, false);
 
     let (neighbors, dists) = nearest_neighbors_max_dist_heap
       .iter()
-      .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
+      .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
       .unzip();
     let q_int = self.mapping.insert(&q);
     self.insert_vertex(q_int, neighbors, dists);
 
     for r in &visited_nodes {
-      self.insert_edge_if_closer(
-        *self.mapping.ext_to_int(&r),
+      let r_int = self.mapping.ext_to_int(&r).clone();
+      let is_inserted = self.insert_edge_if_closer(
+        r_int,
         q_int,
         visited_node_distances_to_q[&r],
       );
+      let r_edges = get_edges_mut_macro!(self, r_int);
+      if is_inserted && self.config.use_lgd {
+        apply_lgd(r_edges, &self.mapping, q_int, &visited_node_distances_to_q);
+      }
     }
     if self.config.use_rrnp {
       self.rrnp(q, q_int, &visited_nodes, &visited_node_distances_to_q);
     }
-
-    if self.config.use_lgd {
-      apply_lgd(
-        self,
-        &nearest_neighbors_max_dist_heap,
-        &visited_nodes,
-        &visited_node_distances_to_q,
-      );
-    }
   }
 
   fn delete(&mut self, ext_id: T) -> () {
-    assert!(self.num_vertices + 1 > self.config.out_degree);
+    assert!(self.num_vertices + 1 > self.config.out_degree as u32);
     match self.mapping.external_to_internal_ids.get(&ext_id) {
       None => {
         // TODO: return a warning?
@@ -873,22 +975,26 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                 // already neighbors or ourself.
                 // Instead of looking for neighbors of neighbors, we simply
                 // do a search.
+                // TODO: after we have implemented the permutation idea, we are
+                // guaranteed to have only one connected component and we can drop
+                // this case.
                 let SearchResults {
                   nearest_neighbors_max_dist_heap,
                   ..
-                } = self.query(
+                } = self.query_internal(
                   self.mapping.int_to_ext(referrer),
                   // we need to find one new node who isn't a neighbor, the
                   // node being deleted, or referrer itself, so we search for
                   // one more than that number.
                   self.config.out_degree as usize + 3,
                   &mut thread_rng(),
+                  false, // we need all the results we can find, so don't ignore occluded nodes
                 );
 
                 let nearest_neighbor = nearest_neighbors_max_dist_heap
                   .into_sorted_vec()
                   .iter()
-                  .map(|sr| (self.mapping.ext_to_int(&sr.id), sr.dist))
+                  .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
                   .filter(|(res_int_id, _dist)| {
                     **res_int_id != int_id
                       && **res_int_id != referrer
@@ -905,7 +1011,7 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                   }
                 }
               }
-              Some(Reverse(SearchResult { id, .. })) => {
+              Some(Reverse(SearchResult { item: id, .. })) => {
                 if id != int_id
                   && id != referrer
                   && !referrer_nbrs.contains(&id)
@@ -974,114 +1080,37 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     max_results: usize,
     prng: &mut R,
   ) -> SearchResults<T> {
-    assert!(self.config.num_searchers <= self.num_vertices);
-    let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
-    let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
-      BinaryHeap::new();
-    let mut visited = HashSet::<T>::new();
-    let mut visited_distances: HashMap<T, f32> = HashMap::default();
-
-    // lines 2 to 10 of the pseudocode
-    for r_index_into_hashmap in sample(
-      prng,
-      self.mapping.internal_to_external_ids.len(),
-      self.config.num_searchers as usize,
-    ) {
-      let (r, r_ext) = self
-        .mapping
-        .internal_to_external_ids
-        .get_index(r_index_into_hashmap)
-        .unwrap();
-      let r_dist = (self.config.dist_fn)(&q, r_ext);
-      visited.insert(r_ext.clone());
-      visited_distances.insert(r_ext.clone(), r_dist);
-      r_min_heap.push(Reverse(SearchResult::new(r_ext.clone(), r_dist)));
-      match q_max_heap.peek() {
-        None => {
-          q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
-          // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
-          // We are skipping it here since we did it above.
-        }
-        Some(f) => {
-          if r_dist < f.dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
-          }
-        }
-      }
-    }
-
-    // lines 11 to 27 of the pseudocode
-    while r_min_heap.len() > 0 {
-      while q_max_heap.len() > max_results {
-        q_max_heap.pop();
-      }
-
-      let Reverse(sr) = r_min_heap.pop().unwrap();
-      let f = { q_max_heap.peek().unwrap().clone() };
-      let sr_int = self.mapping.ext_to_int(&sr.id);
-      if sr.dist > f.dist {
-        break;
-      }
-
-      let mut r_nbrs = self.backpointers[*sr_int as usize].clone();
-      for (nbr, _, _) in self.get_edges(*sr_int).iter() {
-        r_nbrs.insert(*nbr);
-      }
-
-      for e in r_nbrs.iter() {
-        let e_ext = self.mapping.int_to_ext(e);
-        if !visited.contains(&e_ext) {
-          visited.insert(e_ext.clone());
-          let e_dist = (self.config.dist_fn)(&q, e_ext);
-          let f_dist = (self.config.dist_fn)(&q, &f.id);
-          visited_distances.insert(e_ext.clone(), e_dist);
-          if e_dist < f_dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(e_ext.clone(), e_dist));
-            r_min_heap.push(Reverse(SearchResult::new(e_ext.clone(), e_dist)));
-          }
-        }
-      }
-    }
-
-    SearchResults {
-      nearest_neighbors_max_dist_heap: q_max_heap,
-      visited_nodes: visited,
-      visited_node_distances_to_q: visited_distances,
-    }
+    self.query_internal(q, max_results, prng, true)
   }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SearchResult<T> {
-  pub id: T,
+  pub item: T,
   pub dist: f32,
 }
 
 impl<T> SearchResult<T> {
-  pub fn new(id: T, dist: f32) -> SearchResult<T> {
-    Self { id, dist }
+  pub fn new(item: T, dist: f32) -> SearchResult<T> {
+    Self { item, dist }
   }
 }
 
-impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> PartialEq
-  for SearchResult<T>
-{
+impl<T> PartialEq for SearchResult<T> {
   fn eq(&self, other: &Self) -> bool {
-    self.id == other.id
+    self.dist == other.dist
   }
 }
 
-impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> Eq for SearchResult<T> {}
+impl<T> Eq for SearchResult<T> {}
 
-impl<T: std::cmp::PartialOrd + std::cmp::PartialEq> PartialOrd
-  for SearchResult<T>
-{
+impl<T> PartialOrd for SearchResult<T> {
   fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
     self.dist.partial_cmp(&other.dist)
   }
 }
 
-impl<T: Ord> Ord for SearchResult<T> {
+impl<T> Ord for SearchResult<T> {
   fn cmp(&self, other: &Self) -> Ordering {
     self.dist.total_cmp(&other.dist)
   }
@@ -1111,7 +1140,7 @@ pub fn exhaustive_knn_graph<
   // TODO: return Either
 
   assert!(
-    config.out_degree <= n as u32,
+    config.out_degree as usize <= n,
     "out_degree ({}) must be <= ids.len() ({})",
     config.out_degree,
     n,
@@ -1135,7 +1164,7 @@ pub fn exhaustive_knn_graph<
       }
     }
     for edge_ix in 0..config.out_degree as usize {
-      let SearchResult { id, dist } = knn.pop().unwrap();
+      let SearchResult { item: id, dist } = knn.pop().unwrap();
       g.edges[(i as usize * config.out_degree as usize + edge_ix)] =
         (id, dist, DEFAULT_LAMBDA);
       let s = &mut g.backpointers[id as usize];
@@ -1150,15 +1179,6 @@ pub fn exhaustive_knn_graph<
   }
 
   g
-}
-
-fn apply_lgd<T, S: BuildHasher + Clone>(
-  _g: &mut DenseKNNGraph<T, S>,
-  _nearest_neighbors_max_dist_heap: &BinaryHeap<SearchResult<T>>,
-  _visited_nodes: &HashSet<T>,
-  _visited_nodes_distance_to_q: &HashMap<T, f32>,
-) -> () {
-  unimplemented!()
 }
 
 #[cfg(test)]
@@ -1265,7 +1285,6 @@ mod tests {
       exhaustive_knn_graph(vec![&0, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-    let q = [1.2f32];
     let SearchResults {
       nearest_neighbors_max_dist_heap,
       ..
@@ -1273,7 +1292,7 @@ mod tests {
     assert_eq!(
       nearest_neighbors_max_dist_heap
         .iter()
-        .map(|x| (x.id, x.dist))
+        .map(|x| (x.item, x.dist))
         .collect::<Vec<(u32, f32)>>(),
       vec![(0, 1.0), (1u32, 0.0)]
     );
@@ -1281,7 +1300,7 @@ mod tests {
 
   #[test]
   fn test_insert_vertex() {
-    let mut config = mk_config(3, &|x, y| 1.0);
+    let mut config = mk_config(3, &|_x, _y| 1.0);
     config.out_degree = 2;
     let mut g: DenseKNNGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
       DenseKNNGraph::empty(config);
@@ -1306,7 +1325,7 @@ mod tests {
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
     let mut g: DenseKNNGraph<u32, NHH> =
-      DenseKNNGraph::empty(mk_config(2, &|x, y| 1.0));
+      DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -1316,14 +1335,14 @@ mod tests {
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
     let mut g: DenseKNNGraph<u32, NHH> =
-      DenseKNNGraph::empty(mk_config(2, &|x, y| 1.0));
+      DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
   }
 
   #[test]
   fn test_insert_edge_if_closer() {
-    let mut config = mk_config(3, &|&x, &y| 1.0);
+    let mut config = mk_config(3, &|&_x, &_y| 1.0);
     config.out_degree = 1;
     let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(config);
 
@@ -1482,90 +1501,95 @@ mod tests {
         &y.iter().map(|x| x.into_inner()).collect::<Vec<f32>>(),
       )
     };
-    let s = RandomState::new();
-    let config = KNNGraphConfig::new(50, 5, 5, dist_fn, s, true, 2, false);
+    for use_rrnp in [false, true] {
+      for use_lgd in [false, true] {
+        let s = RandomState::new();
+        let config =
+          KNNGraphConfig::new(50, 5, 5, dist_fn, s, use_rrnp, 2, use_lgd);
 
-    let mut g = exhaustive_knn_graph(
-      vec![
-        &vec![
-          OrderedFloat(1f32),
-          OrderedFloat(2f32),
-          OrderedFloat(3f32),
-          OrderedFloat(4f32),
-        ],
-        &vec![
-          OrderedFloat(2f32),
-          OrderedFloat(4f32),
-          OrderedFloat(5f32),
-          OrderedFloat(6f32),
-        ],
-        &vec![
-          OrderedFloat(3f32),
-          OrderedFloat(4f32),
-          OrderedFloat(5f32),
-          OrderedFloat(12f32),
-        ],
-        &vec![
-          OrderedFloat(23f32),
-          OrderedFloat(14f32),
-          OrderedFloat(45f32),
-          OrderedFloat(142f32),
-        ],
-        &vec![
-          OrderedFloat(37f32),
-          OrderedFloat(45f32),
-          OrderedFloat(53f32),
-          OrderedFloat(122f32),
-        ],
-        &vec![
-          OrderedFloat(13f32),
-          OrderedFloat(14f32),
-          OrderedFloat(555f32),
-          OrderedFloat(125f32),
-        ],
-        &vec![
-          OrderedFloat(13f32),
-          OrderedFloat(4f32),
-          OrderedFloat(53f32),
-          OrderedFloat(12f32),
-        ],
-        &vec![
-          OrderedFloat(33f32),
-          OrderedFloat(4f32),
-          OrderedFloat(53f32),
-          OrderedFloat(312f32),
-        ],
-      ],
-      config,
-    );
+        let g = exhaustive_knn_graph(
+          vec![
+            &vec![
+              OrderedFloat(1f32),
+              OrderedFloat(2f32),
+              OrderedFloat(3f32),
+              OrderedFloat(4f32),
+            ],
+            &vec![
+              OrderedFloat(2f32),
+              OrderedFloat(4f32),
+              OrderedFloat(5f32),
+              OrderedFloat(6f32),
+            ],
+            &vec![
+              OrderedFloat(3f32),
+              OrderedFloat(4f32),
+              OrderedFloat(5f32),
+              OrderedFloat(12f32),
+            ],
+            &vec![
+              OrderedFloat(23f32),
+              OrderedFloat(14f32),
+              OrderedFloat(45f32),
+              OrderedFloat(142f32),
+            ],
+            &vec![
+              OrderedFloat(37f32),
+              OrderedFloat(45f32),
+              OrderedFloat(53f32),
+              OrderedFloat(122f32),
+            ],
+            &vec![
+              OrderedFloat(13f32),
+              OrderedFloat(14f32),
+              OrderedFloat(555f32),
+              OrderedFloat(125f32),
+            ],
+            &vec![
+              OrderedFloat(13f32),
+              OrderedFloat(4f32),
+              OrderedFloat(53f32),
+              OrderedFloat(12f32),
+            ],
+            &vec![
+              OrderedFloat(33f32),
+              OrderedFloat(4f32),
+              OrderedFloat(53f32),
+              OrderedFloat(312f32),
+            ],
+          ],
+          config,
+        );
 
-    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+        let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 
-    let SearchResults {
-      nearest_neighbors_max_dist_heap,
-      ..
-    } = g.query(
-      &vec![
-        OrderedFloat(34f32),
-        OrderedFloat(5f32),
-        OrderedFloat(53f32),
-        OrderedFloat(312f32),
-      ],
-      1,
-      &mut prng,
-    );
-    assert_eq!(
-      nearest_neighbors_max_dist_heap
-        .iter()
-        .map(|x| (x.id.clone(), x.dist))
-        .collect::<Vec<(Vec<OrderedFloat<f32>>, f32)>>()[0]
-        .0,
-      vec![
-        OrderedFloat(33f32),
-        OrderedFloat(4f32),
-        OrderedFloat(53f32),
-        OrderedFloat(312f32),
-      ]
-    );
+        let SearchResults {
+          nearest_neighbors_max_dist_heap,
+          ..
+        } = g.query(
+          &vec![
+            OrderedFloat(34f32),
+            OrderedFloat(5f32),
+            OrderedFloat(53f32),
+            OrderedFloat(312f32),
+          ],
+          1,
+          &mut prng,
+        );
+        assert_eq!(
+          nearest_neighbors_max_dist_heap
+            .iter()
+            .map(|x| (x.item.clone(), x.dist))
+            .collect::<Vec<(Vec<OrderedFloat<f32>>, f32)>>()[0]
+            .0,
+          vec![
+            OrderedFloat(33f32),
+            OrderedFloat(4f32),
+            OrderedFloat(53f32),
+            OrderedFloat(312f32),
+          ]
+        );
+      }
+    }
   }
 }
