@@ -13,3 +13,6 @@ atomic_float = "0.1.0"
 nohash-hasher = "0.2.0"
 rayon = "1.5.1" #TODO: remove?
 tinyset = "0.4.2"
+
+[profile.release]
+debug = true

@@ -13,6 +13,8 @@ extern crate tinyset;
 
 use graph_anns::*;
 use nohash_hasher::NoHashHasher;
+use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
@@ -283,7 +285,7 @@ fn pause() {
 //   pause();
 // }
 
-fn main() {
+fn allocate_1_billion() {
   println!(
     "let's see how much memory a 1-billion element DenseKNNGraph takes."
   );
@@ -306,6 +308,78 @@ fn main() {
 
   println!("Time elapsed: {:?}", duration);
   pause();
+}
+
+fn load_texmex_to_dense() {
+  let start_load_data = Instant::now();
+  let base_vecs =
+    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
+      .unwrap();
+  let query_vecs = texmex::Vecs::<u8>::new(
+    "/mnt/970pro/anns/bigann_query.bvecs_array_one_point",
+    128,
+  )
+  .unwrap();
+  println!("Loaded dataset in {:?}", start_load_data.elapsed());
+
+  let start_allocate_graph = Instant::now();
+
+  let dist_fn = |x: &u32, y: &u32| -> f32 {
+    return texmex::sq_euclidean_faster(
+      &base_vecs[*x as usize],
+      &base_vecs[*y as usize],
+    );
+  };
+
+  let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
+    nohash_hasher::BuildNoHashHasher::default();
+
+  // out_degree of 10 -> OOM. 7 -> 89.7 resident, slow insertion (310s per 100k).
+  // 5 -> ~80 resident, 200s per 100k insertion. 3 might be optimal.
+  // out_degree 3, num_searchers 5 -> ~45 resident, 40s per 100k.
+  // out_degree 3, num_searchers 5, rrnp=false -> ~45 resident, 40s per 100k -- i.e. rrnp makes no difference?
+  // TODO: collect stats on how much rrnp actually changes the graph on each insertion.
+  // higher num_searchers also kills insertion speed.
+  // TODO: should num_searchers be dynamic based on graph size? If small, don't
+  // need a lot.
+  let config = KNNGraphConfig::new(
+    base_vecs.num_rows as u32,
+    3,
+    5,
+    &dist_fn,
+    build_hasher,
+    false,
+    2,
+    true,
+  );
+
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  let mut g = KNN::new(config);
+
+  // oops, this is irrelevant because we start out with the brute force
+  // implementation. So this is 19 microseconds. All of the real allocation is
+  // going to happen invisibly on one of the inserts. We should log the insert
+  // time of each insert to a CSV. We're going to see a *crazy* latency spike
+  // for one of the insertions.
+  println!("Allocated graph in {:?}", start_allocate_graph.elapsed());
+
+  let start_inserting = Instant::now();
+
+  for i in 0..base_vecs.num_rows {
+    if i % 100000 == 0 {
+      println!("inserting {}", i);
+      println!("elapsed: {:?}", start_inserting.elapsed());
+    }
+    g.insert(i as u32, &mut prng);
+  }
+  println!(
+    "Finished building the nearest neighbors graph in {:?}",
+    start_inserting.elapsed()
+  );
+}
+
+fn main() {
+  load_texmex_to_dense();
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.
