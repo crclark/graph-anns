@@ -1,5 +1,6 @@
 #![feature(total_cmp)]
 #![feature(is_sorted)]
+#![feature(portable_simd)]
 extern crate atomic_float;
 extern crate graph_anns;
 extern crate nix;
@@ -10,17 +11,21 @@ extern crate rand_core;
 extern crate rand_xoshiro;
 extern crate rayon;
 extern crate tinyset;
+extern crate unroll;
 
 use graph_anns::*;
 use nohash_hasher::NoHashHasher;
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
-use std::hash::BuildHasherDefault;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::path::Path;
 use std::time::Instant;
 use std::{io, thread};
+use texmex::ID;
 
 use std::io::prelude::*;
 
@@ -302,7 +307,7 @@ fn allocate_1_billion() {
     nohash_hasher::BuildNoHashHasher::default();
   let config =
     KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, 2, false);
-  let mut g = DenseKNNGraph::empty(config);
+  let g = DenseKNNGraph::empty(config);
 
   let duration = start.elapsed();
 
@@ -310,30 +315,35 @@ fn allocate_1_billion() {
   pause();
 }
 
-fn load_texmex_to_dense() {
-  let start_load_data = Instant::now();
-  let base_vecs =
-    texmex::Vecs::<u8>::new("/mnt/970pro/anns/bigann_base.bvecs_array", 128)
-      .unwrap();
-  let query_vecs = texmex::Vecs::<u8>::new(
-    "/mnt/970pro/anns/bigann_query.bvecs_array_one_point",
-    128,
-  )
-  .unwrap();
-  println!("Loaded dataset in {:?}", start_load_data.elapsed());
+fn make_dist_fn<'a>(
+  base_vecs: texmex::Vecs<'a, u8>,
+  query_vecs: texmex::Vecs<'a, u8>,
+) -> impl Fn(&ID, &ID) -> f32 + 'a {
+  let dist_fn = Box::new(move |x: &ID, y: &ID| -> f32 {
+    let x_slice = match x {
+      ID::Base(i) => &base_vecs[*i as usize],
+      ID::Query(i) => &query_vecs[*i as usize],
+    };
+    let y_slice = match y {
+      ID::Base(i) => &base_vecs[*i as usize],
+      ID::Query(i) => &query_vecs[*i as usize],
+    };
+    return texmex::sq_euclidean_iter(x_slice, y_slice);
+  });
+  dist_fn
+}
 
+fn load_texmex_to_dense<'a>(
+  subset_size: u32,
+  dist_fn: &'a dyn Fn(&ID, &ID) -> f32,
+) -> KNN<'a, ID, RandomState> {
   let start_allocate_graph = Instant::now();
 
-  let dist_fn = |x: &u32, y: &u32| -> f32 {
-    return texmex::sq_euclidean_faster(
-      &base_vecs[*x as usize],
-      &base_vecs[*y as usize],
-    );
-  };
+  let build_hasher = RandomState::new();
 
-  let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
-    nohash_hasher::BuildNoHashHasher::default();
-
+  // TODO: re-run the time benchmarks below with  RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo run texmex_tests
+  // I was accidentally disabling optimizations when I ran the benchmarks below because I was mixing
+  // --release with RUSTFLAGS, and RUSTFLAGS was taking precedence.
   // out_degree of 10 -> OOM. 7 -> 89.7 resident, slow insertion (310s per 100k).
   // 5 -> ~80 resident, 200s per 100k insertion. 3 might be optimal.
   // out_degree 3, num_searchers 5 -> ~45 resident, 40s per 100k.
@@ -342,13 +352,40 @@ fn load_texmex_to_dense() {
   // higher num_searchers also kills insertion speed.
   // TODO: should num_searchers be dynamic based on graph size? If small, don't
   // need a lot.
+  //
+  // Parameter effects on search quality (recall@r):
+  // out_degree 7, num_searchers 7, rrnp false, lgd true -> 0.33 recall@10
+  // out_degree 7, num_searchers 7, rrnp true, lgd true -> 0.3038 recall@10
+  // out_degree 7, num_searchers 14, rrnp true, lgd true -> 0.31 recall@10
+  // out_degree 3, num_searchers 7, rrnp false, lgd true -> 0.0005 recall@10
+  // out_degree 15, num_searchers 7, rrnp false, lgd true -> 0.7062 recall@10
+  // out_degree 20, num_searchers 7, rrnp true, lgd true -> 0.79 recall@10, 1000s runtime
+  // out_degree 20, num_searchers 1, rrnp true, lgd true -> 0.78 recall@10, 1070s runtime
+  // out_degree 30, num_searchers 1, rrnp true, lgd true -> 0.87 recall@10, 1973s runtime
+  // out_degree 40, num_searchers 1, rrnp true, lgd true -> 0.91 recall@10, 3145s runtime
+  // TL;dr: higher out_degree has greatest effect on search quality. That's
+  // frustrating because it is also the greatest contributor to memory usage.
+  //
+  // Other performance observations:
+  //
+  // - Search speed degrades as the graph gets bigger (of course), but the rate
+  // of degradation is steeper for larger out_degree -- for small out_degree (e.g., 7),
+  // it's unnoticeable for 1M items, but for out_degree 20, inserting 100k items
+  // takes an additional 10s for each 100k items already in the graph. Oof.
+  // - For out_degree and num_searchers = 7, insertion speed starts to significantly
+  // degrade after 250M points have been inserted. So inserting the remaining points
+  // will take *at least* 1500 additional hours (assuming no further speed degradation)!
+  // We will need to split into multiple graphs (optionally managed by separate threads)
+  // to reach 1B points. The tradeoff to faster insertion may be slower search (or at least
+  // multithreaded search). Hmm. I think the benefit to insertion will far outweigh the
+  // slowdown at search time, which may not be too bad.
   let config = KNNGraphConfig::new(
-    base_vecs.num_rows as u32,
-    3,
-    5,
-    &dist_fn,
+    subset_size,
+    7,
+    7,
+    dist_fn,
     build_hasher,
-    false,
+    true,
     2,
     true,
   );
@@ -365,21 +402,69 @@ fn load_texmex_to_dense() {
 
   let start_inserting = Instant::now();
 
-  for i in 0..base_vecs.num_rows {
+  for i in 0..subset_size {
     if i % 100000 == 0 {
       println!("inserting {}", i);
       println!("elapsed: {:?}", start_inserting.elapsed());
     }
-    g.insert(i as u32, &mut prng);
+    g.insert(ID::Base(i as u32), &mut prng);
   }
   println!(
     "Finished building the nearest neighbors graph in {:?}",
     start_inserting.elapsed()
   );
+  g
+}
+
+fn recall_at_r<R: RngCore>(
+  g: &KNN<ID, RandomState>,
+  query_vecs: &texmex::Vecs<u8>,
+  ground_truth: &texmex::Vecs<i32>,
+  r: usize,
+  prng: &mut R,
+) -> f32 {
+  let start_recall = Instant::now();
+  let mut num_correct = 0;
+  for i in 0..query_vecs.num_rows {
+    let query = ID::Query(i as u32);
+    let SearchResults {
+      approximate_nearest_neighbors,
+      ..
+    } = g.query(&query, r, prng);
+    // TODO: passing a PRNG into every query? Just store it in the graph.
+    for nbr in approximate_nearest_neighbors {
+      let nbr_id = match nbr.item {
+        ID::Base(i) => i,
+        ID::Query(i) => i,
+      };
+      if ground_truth[i as usize][0] == nbr_id as i32 {
+        num_correct += 1;
+      }
+    }
+  }
+  println!("Finished recall@{} in {:?}", r, start_recall.elapsed());
+
+  num_correct as f32 / query_vecs.num_rows as f32
 }
 
 fn main() {
-  load_texmex_to_dense();
+  // TODO: this is absurdly slow to build a graph, even for just 1M elements.
+  // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
+  // distance function unless there's something egregiously broken there.
+  let subset_size: u32 = 1000_000_000;
+  let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
+  let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
+  let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
+  let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
+  let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
+
+  let dist_fn = make_dist_fn(base_vecs, query_vecs);
+  let g = load_texmex_to_dense(subset_size, &dist_fn);
+
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
+  println!("Recall@10: {}", recall);
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.
