@@ -192,7 +192,8 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
       visited_node_distances_to_q.insert(*x, dist);
     }
     SearchResults {
-      nearest_neighbors_max_dist_heap,
+      approximate_nearest_neighbors: nearest_neighbors_max_dist_heap
+        .into_sorted_vec(),
       visited_nodes,
       visited_node_distances_to_q,
     }
@@ -326,7 +327,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       KNN::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
           panic!("TODO create error type etc.");
-        } else if g.contents.len() == 100 {
+        } else if g.contents.len() == 20 {
           *self = KNN::Large(convert_bruteforce_to_dense(g, config.clone()));
           self.insert(x, prng);
         } else {
@@ -840,7 +841,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     }
 
     SearchResults {
-      nearest_neighbors_max_dist_heap: q_max_heap,
+      approximate_nearest_neighbors: q_max_heap.into_sorted_vec(),
       visited_nodes: visited,
       visited_node_distances_to_q: visited_distances,
     }
@@ -911,12 +912,12 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   fn insert<R: RngCore>(&mut self, q: T, prng: &mut R) -> () {
     //TODO: return the index of the new data point
     let SearchResults {
-      nearest_neighbors_max_dist_heap,
+      approximate_nearest_neighbors: nearest_neighbors,
       visited_nodes,
       visited_node_distances_to_q,
     } = self.query_internal(&q, self.config.out_degree as usize, prng, false);
 
-    let (neighbors, dists) = nearest_neighbors_max_dist_heap
+    let (neighbors, dists) = nearest_neighbors
       .iter()
       .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
       .unzip();
@@ -979,7 +980,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                 // guaranteed to have only one connected component and we can drop
                 // this case.
                 let SearchResults {
-                  nearest_neighbors_max_dist_heap,
+                  approximate_nearest_neighbors: nearest_neighbors,
                   ..
                 } = self.query_internal(
                   self.mapping.int_to_ext(referrer),
@@ -991,8 +992,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                   false, // we need all the results we can find, so don't ignore occluded nodes
                 );
 
-                let nearest_neighbor = nearest_neighbors_max_dist_heap
-                  .into_sorted_vec()
+                let nearest_neighbor = nearest_neighbors
                   .iter()
                   .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
                   .filter(|(res_int_id, _dist)| {
@@ -1117,11 +1117,16 @@ impl<T> Ord for SearchResult<T> {
 }
 
 pub struct SearchResults<T> {
-  pub nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>>,
+  /// Results of the search, in order of increasing distance from the query.
+  pub approximate_nearest_neighbors: Vec<SearchResult<T>>,
   // TODO: allow user to optimize this with nohash_hasher somehow.
   // either allow them to pass in a hasher, or use specializations.
   // The former complicates the API but is more extensible.
+  // TODO: consolidate visited_nodes and visited_nodes_distance_to_q into one
+  // vec of SearchResults.
+  /// Set of nodes visited during the search. Most users won't need this info.
   pub visited_nodes: HashSet<T>,
+  /// Distances of the nodes in visited_nodes to the query point.
   pub visited_node_distances_to_q: HashMap<T, f32>,
 }
 
@@ -1286,15 +1291,15 @@ mod tests {
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let SearchResults {
-      nearest_neighbors_max_dist_heap,
+      approximate_nearest_neighbors: nearest_neighbors,
       ..
     } = g.query(&1, 2, &mut prng);
     assert_eq!(
-      nearest_neighbors_max_dist_heap
+      nearest_neighbors
         .iter()
         .map(|x| (x.item, x.dist))
         .collect::<Vec<(u32, f32)>>(),
-      vec![(0, 1.0), (1u32, 0.0)]
+      vec![(1u32, 0.0), (0, 1.0)]
     );
   }
 
@@ -1564,7 +1569,7 @@ mod tests {
         let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 
         let SearchResults {
-          nearest_neighbors_max_dist_heap,
+          approximate_nearest_neighbors: nearest_neighbors,
           ..
         } = g.query(
           &vec![
@@ -1577,7 +1582,7 @@ mod tests {
           &mut prng,
         );
         assert_eq!(
-          nearest_neighbors_max_dist_heap
+          nearest_neighbors
             .iter()
             .map(|x| (x.item.clone(), x.dist))
             .collect::<Vec<(Vec<OrderedFloat<f32>>, f32)>>()[0]
