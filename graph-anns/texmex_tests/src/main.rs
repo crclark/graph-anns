@@ -1,8 +1,8 @@
-#![feature(total_cmp)]
 #![feature(is_sorted)]
 #![feature(portable_simd)]
 extern crate atomic_float;
 extern crate graph_anns;
+extern crate indicatif;
 extern crate nix;
 extern crate nohash_hasher;
 extern crate parking_lot;
@@ -11,18 +11,18 @@ extern crate rand_core;
 extern crate rand_xoshiro;
 extern crate rayon;
 extern crate tinyset;
-extern crate unroll;
 
 use graph_anns::*;
-use nohash_hasher::NoHashHasher;
+use indicatif::{ParallelProgressIterator, ProgressStyle};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::binary_heap::BinaryHeap;
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::hash::BuildHasher;
 use std::path::Path;
+use std::sync::RwLock;
 use std::time::Instant;
 use std::{io, thread};
 use texmex::ID;
@@ -290,35 +290,35 @@ fn pause() {
 //   pause();
 // }
 
-fn allocate_1_billion() {
-  println!(
-    "let's see how much memory a 1-billion element DenseKNNGraph takes."
-  );
+// fn allocate_1_billion() {
+//   println!(
+//     "let's see how much memory a 1-billion element DenseKNNGraph takes."
+//   );
 
-  // answer: 67.3G resident, took 211 seconds to allocate.
+//   // answer: 67.3G resident, took 211 seconds to allocate.
 
-  fn dist(x: &u32, y: &u32) -> f32 {
-    return 1.1f32;
-  }
+//   fn dist(_x: &u32, _y: &u32) -> f32 {
+//     return 1.1f32;
+//   }
 
-  let n = 1000_000_000;
-  let start = Instant::now();
-  let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
-    nohash_hasher::BuildNoHashHasher::default();
-  let config =
-    KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, 2, false);
-  let g = DenseKNNGraph::empty(config);
+//   let n = 1000_000_000;
+//   let start = Instant::now();
+//   let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
+//     nohash_hasher::BuildNoHashHasher::default();
+//   let config =
+//     KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, 2, false);
+//   let _ = DenseKNNGraph::empty(config);
 
-  let duration = start.elapsed();
+//   let duration = start.elapsed();
 
-  println!("Time elapsed: {:?}", duration);
-  pause();
-}
+//   println!("Time elapsed: {:?}", duration);
+//   pause();
+// }
 
 fn make_dist_fn<'a>(
   base_vecs: texmex::Vecs<'a, u8>,
   query_vecs: texmex::Vecs<'a, u8>,
-) -> impl Fn(&ID, &ID) -> f32 + 'a {
+) -> impl Fn(&ID, &ID) -> f32 + 'a + Clone + Sync + Send {
   let dist_fn = Box::new(move |x: &ID, y: &ID| -> f32 {
     let x_slice = match x {
       ID::Base(i) => &base_vecs[*i as usize],
@@ -335,7 +335,7 @@ fn make_dist_fn<'a>(
 
 fn load_texmex_to_dense<'a>(
   subset_size: u32,
-  dist_fn: &'a dyn Fn(&ID, &ID) -> f32,
+  dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
 ) -> KNN<'a, ID, RandomState> {
   let start_allocate_graph = Instant::now();
 
@@ -416,8 +416,8 @@ fn load_texmex_to_dense<'a>(
   g
 }
 
-fn recall_at_r<R: RngCore>(
-  g: &KNN<ID, RandomState>,
+fn recall_at_r<G: NN<ID>, R: RngCore>(
+  g: &G,
   query_vecs: &texmex::Vecs<u8>,
   ground_truth: &texmex::Vecs<i32>,
   r: usize,
@@ -447,16 +447,16 @@ fn recall_at_r<R: RngCore>(
   num_correct as f32 / query_vecs.num_rows as f32
 }
 
-fn main() {
+fn main_serial() {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
-  let subset_size: u32 = 1000_000_000;
+  let subset_size: u32 = 1000_000;
   let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
   let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1M.ivecs_array");
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
@@ -465,6 +465,184 @@ fn main() {
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
   println!("Recall@10: {}", recall);
+}
+
+// TODO: we need to parallelize insertion because it gets slower as more stuff
+// is inserted. Let's start by implementing parallelization here, then move
+// it into the library once we know what we are doing. It would be nice if we
+// can keep it flexible -- maybe no dependency on rayon or queues and just
+// focus on providing a helper that maintains a set of graphs behind rwlocks
+// and basic tools to merge search results. Then users can decide how to put
+// them together into a real application. We can also provide a basic helper
+// that works for most use cases.
+//
+// Step 1: merge function for search results.
+// Step 2: struct that contains a vec of rwlock<graph>
+// Step 3: use rayon parallel iterator over enum(rows_to_insert), insert
+// into i%n graph, where n is the number of graphs.
+// Step 4: search in parallel across all graphs, merge results.
+
+/// A simple wrapper around a Vec of RwLocks of graphs to provide a basic
+/// parallel insert/search interface.
+/// The capacity of each graph is set to 1/n of the total capacity in the input
+/// config, so be
+/// careful when inserting -- if you don't balance your inserts, you could hit
+/// problems with the graphs filling up.
+/// insert() can be called from multiple threads and write locks a random graph.
+/// search() can be called from multiple threads and read locks all graphs. All
+/// searches within are performed sequentially and the results are
+/// merged.
+/// delete() can be called from multiple threads and write locks all graphs sequentially (because
+/// we don't know which graph an item was originally inserted into). Only one graph is locked at any time.
+/// All deletes within are performed in sequentially.
+///
+/// This can obviously be improved upon -- concurrent search and delete could experience races
+/// since internally, graphs are locked sequentially. The user can also directly access
+/// individual graphs for better performance -- for example, you can parallelize
+/// insertion more efficiently by inserting into graph i%n instead of calling
+/// a prng. The insert() function can't do that because it doesn't have access
+/// to i.
+pub struct ManyKNN<'a, ID, S: BuildHasher + Clone> {
+  pub graphs: Vec<RwLock<KNN<'a, ID, S>>>,
+}
+
+impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
+  ManyKNN<'_, ID, S>
+{
+  pub fn new(n: u32, config: KNNGraphConfig<ID, S>) -> ManyKNN<ID, S> {
+    let total_capacity = config.capacity;
+    let individual_capacity = total_capacity / n + total_capacity % n as u32;
+    let mut graphs = Vec::with_capacity(n as usize);
+    for i in 0..n {
+      let mut config = config.clone();
+      graphs.push(RwLock::new(KNN::new(config)));
+    }
+    ManyKNN { graphs }
+  }
+
+  pub fn debug_size_stats(&self) -> SpaceReport {
+    self
+      .graphs
+      .iter()
+      .map(|g| g.read().unwrap().debug_size_stats())
+      .reduce(|acc, e| acc.merge(&e))
+      .unwrap()
+  }
+}
+
+impl<
+    'a,
+    T: Copy + Ord + Eq + std::hash::Hash + Send + Sync,
+    S: BuildHasher + Clone + Send + Sync,
+  > NN<T> for ManyKNN<'a, T, S>
+{
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+    let i = prng.next_u32() % self.graphs.len() as u32;
+    let mut g = self.graphs[i as usize].write().unwrap();
+    g.insert(x, prng);
+  }
+
+  fn delete(&mut self, x: T) -> () {
+    for g in &self.graphs {
+      let mut g = g.write().unwrap();
+      g.delete(x);
+    }
+  }
+
+  fn query<R: RngCore>(
+    &self,
+    q: &T,
+    max_results: usize,
+    prng: &mut R,
+  ) -> SearchResults<T> {
+    let mut results = (0..self.graphs.len())
+      .into_par_iter()
+      .map(|i| {
+        self.graphs[i].read().unwrap().query(
+          q,
+          max_results,
+          &mut rand::thread_rng(),
+        )
+      })
+      .reduce(|| SearchResults::<T>::default(), |acc, e| acc.merge(&e));
+
+    results.approximate_nearest_neighbors.truncate(max_results);
+    results
+  }
+}
+
+fn load_texmex_to_dense_par<'a>(
+  subset_size: u32,
+  num_graphs: u32,
+  dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+) -> ManyKNN<'a, ID, RandomState> {
+  let start_allocate_graph = Instant::now();
+
+  let build_hasher = RandomState::new();
+
+  let config = KNNGraphConfig::new(
+    subset_size / num_graphs as u32,
+    7,
+    7,
+    dist_fn,
+    build_hasher,
+    true,
+    2,
+    true,
+  );
+
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  let mut g = ManyKNN::new(num_graphs, config);
+
+  // oops, this is irrelevant because we start out with the brute force
+  // implementation. So this is 19 microseconds. All of the real allocation is
+  // going to happen invisibly on one of the inserts. We should log the insert
+  // time of each insert to a CSV. We're going to see a *crazy* latency spike
+  // for one of the insertions.
+  println!("Allocated graph in {:?}", start_allocate_graph.elapsed());
+
+  let start_inserting = Instant::now();
+
+  let style = ProgressStyle::with_template(
+    "[{elapsed_precise}] {bar:40.cyan/blue} {human_pos:>7}/{human_len:7} ETA: {eta_precise} Insertions/sec: {per_sec}",
+  )
+  .unwrap();
+
+  (0..subset_size)
+    .into_par_iter()
+    .progress_with_style(style)
+    .for_each(|i| {
+      let mut g = g.graphs[i as usize % g.graphs.len()].write().unwrap();
+      g.insert(ID::Base(i as u32), &mut rand::thread_rng());
+    });
+  println!(
+    "Finished building the nearest neighbors graph in {:?}",
+    start_inserting.elapsed()
+  );
+
+  println!("Graph size: {:?}", g.debug_size_stats());
+  g
+}
+
+fn main() {
+  // NOTE: change gnd_path when you change this
+  let subset_size: u32 = 5_000_000;
+  let num_graphs: u32 = 32;
+  let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
+  let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
+  let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
+  let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
+  // NOTE: change this path depending on subset_size
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
+  let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
+
+  let dist_fn = make_dist_fn(base_vecs, query_vecs);
+  let g = load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn);
+
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
+  println!("Recall@10: {}", recall);
+  pause()
 }
 
 // test to make sure I understand how to share a vec of atomics between threads.

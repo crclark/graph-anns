@@ -2,8 +2,6 @@ use nix::sys::mman::{mmap, MapFlags, ProtFlags};
 use std::convert::TryInto;
 use std::fs::File;
 use std::os::unix::io::IntoRawFd;
-use std::simd::i32x4;
-use unroll::unroll_for_loops;
 
 // A handle to a file in the bvecs_array, ivecs_array, or fvecs_array format on
 // disk. The file is mmaped. The associated functions are used to read vectors
