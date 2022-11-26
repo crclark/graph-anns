@@ -1,4 +1,3 @@
-#![feature(total_cmp)]
 #![feature(is_sorted)]
 extern crate indexmap;
 extern crate nohash_hasher;
@@ -89,7 +88,7 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
   /// distance function. Must satisfy the criteria of a metric:
   /// https://en.wikipedia.org/wiki/Metric_(mathematics). Several internal
   /// optimizations assume the triangle inequality holds.
-  pub dist_fn: &'a dyn Fn(&T, &T) -> f32,
+  pub dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   pub build_hasher: S,
   /// Whether to use restricted recursive neighborhood propagation. This improves
   /// search speed, but decreases insertion throughput. TODO: verify that's
@@ -112,7 +111,7 @@ impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
     capacity: u32,
     out_degree: u8,
     num_searchers: u32,
-    dist_fn: &'a dyn Fn(&T, &T) -> f32,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
     build_hasher: S,
     use_rrnp: bool,
     rrnp_max_depth: u32,
@@ -151,15 +150,24 @@ pub trait NN<T> {
 
 pub struct BruteForceKNN<'a, T> {
   pub contents: HashSet<T>,
-  pub distance: &'a dyn Fn(&T, &T) -> f32,
+  // TODO: made this Sync so that I could share a single closure across threads
+  // when splitting up a graph into multiple pieces. Is this going to be onerous
+  // to users?
+  pub distance: &'a (dyn Fn(&T, &T) -> f32 + Sync),
 }
 
 impl<'a, T> BruteForceKNN<'a, T> {
-  pub fn new(distance: &'a dyn Fn(&T, &T) -> f32) -> BruteForceKNN<'a, T> {
+  pub fn new(
+    distance: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+  ) -> BruteForceKNN<'a, T> {
     BruteForceKNN {
       contents: HashSet::new(),
       distance,
     }
+  }
+
+  pub fn debug_size_stats(&self) -> SpaceReport {
+    SpaceReport::default()
   }
 }
 
@@ -393,6 +401,79 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
       }
     }
   }
+
+  /// Returns information about the length and capacity of all data structures
+  /// in the graph.
+  pub fn debug_size_stats(&self) -> SpaceReport {
+    match self {
+      KNN::Small { g, .. } => g.debug_size_stats(),
+      KNN::Large(g) => g.debug_size_stats(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceReport {
+  pub mapping_int_ext_len: usize,
+  pub mapping_int_ext_capacity: usize,
+  pub mapping_ext_int_len: usize,
+  pub mapping_ext_int_capacity: usize,
+  pub mapping_deleted_len: usize,
+  pub mapping_deleted_capacity: usize,
+  pub edges_vec_len: usize,
+  pub edges_vec_capacity: usize,
+  pub backpointers_len: usize,
+  pub backpointers_capacity: usize,
+  pub backpointers_sets_sum_len: usize,
+  pub backpointers_sets_sum_capacity: usize,
+  backpointers_sets_mem_used: usize,
+}
+
+impl SpaceReport {
+  pub fn merge(&self, other: &Self) -> SpaceReport {
+    SpaceReport {
+      mapping_int_ext_len: self.mapping_int_ext_len + other.mapping_int_ext_len,
+      mapping_int_ext_capacity: self.mapping_int_ext_capacity
+        + other.mapping_int_ext_capacity,
+      mapping_ext_int_len: self.mapping_ext_int_len + other.mapping_ext_int_len,
+      mapping_ext_int_capacity: self.mapping_ext_int_capacity
+        + other.mapping_ext_int_capacity,
+      mapping_deleted_len: self.mapping_deleted_len + other.mapping_deleted_len,
+      mapping_deleted_capacity: self.mapping_deleted_capacity
+        + other.mapping_deleted_capacity,
+      edges_vec_len: self.edges_vec_len + other.edges_vec_len,
+      edges_vec_capacity: self.edges_vec_capacity + other.edges_vec_capacity,
+      backpointers_len: self.backpointers_len + other.backpointers_len,
+      backpointers_capacity: self.backpointers_capacity
+        + other.backpointers_capacity,
+      backpointers_sets_sum_len: self.backpointers_sets_sum_len
+        + other.backpointers_sets_sum_len,
+      backpointers_sets_sum_capacity: self.backpointers_sets_sum_capacity
+        + other.backpointers_sets_sum_capacity,
+      backpointers_sets_mem_used: self.backpointers_sets_mem_used
+        + other.backpointers_sets_mem_used,
+    }
+  }
+}
+
+impl Default for SpaceReport {
+  fn default() -> Self {
+    SpaceReport {
+      mapping_int_ext_len: 0,
+      mapping_int_ext_capacity: 0,
+      mapping_ext_int_len: 0,
+      mapping_ext_int_capacity: 0,
+      mapping_deleted_len: 0,
+      mapping_deleted_capacity: 0,
+      edges_vec_len: 0,
+      edges_vec_capacity: 0,
+      backpointers_len: 0,
+      backpointers_capacity: 0,
+      backpointers_sets_sum_len: 0,
+      backpointers_sets_sum_capacity: 0,
+      backpointers_sets_mem_used: 0,
+    }
+  }
 }
 
 /// A directed graph stored contiguously in memory as an adjacency list.
@@ -423,6 +504,44 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
 impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   DenseKNNGraph<'a, T, S>
 {
+  /// Returns information about the length and capacity of all data structures
+  /// in the graph.
+  pub fn debug_size_stats(&self) -> SpaceReport {
+    SpaceReport {
+      mapping_int_ext_len: self.mapping.internal_to_external_ids.len(),
+      mapping_int_ext_capacity: self
+        .mapping
+        .internal_to_external_ids
+        .capacity(),
+      mapping_ext_int_len: self.mapping.external_to_internal_ids.len(),
+      mapping_ext_int_capacity: self
+        .mapping
+        .external_to_internal_ids
+        .capacity(),
+      mapping_deleted_len: self.mapping.deleted.len(),
+      mapping_deleted_capacity: self.mapping.deleted.capacity(),
+      edges_vec_len: self.edges.len(),
+      edges_vec_capacity: self.edges.capacity(),
+      backpointers_len: self.backpointers.len(),
+      backpointers_capacity: self.backpointers.capacity(),
+      backpointers_sets_sum_len: self
+        .backpointers
+        .iter()
+        .map(|s| s.len())
+        .sum(),
+      backpointers_sets_sum_capacity: self
+        .backpointers
+        .iter()
+        .map(|s| s.capacity())
+        .sum(),
+      backpointers_sets_mem_used: self
+        .backpointers
+        .iter()
+        .map(|s| s.mem_used())
+        .sum(),
+    }
+  }
+
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   // TODO: no pub, not usable
@@ -1116,6 +1235,7 @@ impl<T> Ord for SearchResult<T> {
   }
 }
 
+#[derive(Debug, Clone)]
 pub struct SearchResults<T> {
   /// Results of the search, in order of increasing distance from the query.
   pub approximate_nearest_neighbors: Vec<SearchResult<T>>,
@@ -1128,6 +1248,41 @@ pub struct SearchResults<T> {
   pub visited_nodes: HashSet<T>,
   /// Distances of the nodes in visited_nodes to the query point.
   pub visited_node_distances_to_q: HashMap<T, f32>,
+}
+
+impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
+  pub fn merge(&self, other: &Self) -> SearchResults<T> {
+    let mut merged = self.clone();
+    let self_nearest_set = self
+      .approximate_nearest_neighbors
+      .iter()
+      .map(|r| r.item.clone())
+      .collect::<HashSet<T>>();
+    for result in other.approximate_nearest_neighbors.iter() {
+      if !self_nearest_set.contains(&result.item) {
+        merged.approximate_nearest_neighbors.push(result.clone());
+      }
+    }
+
+    merged
+      .approximate_nearest_neighbors
+      .sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+    merged.visited_nodes.extend(other.visited_nodes.clone());
+    merged
+      .visited_node_distances_to_q
+      .extend(other.visited_node_distances_to_q.clone());
+    merged
+  }
+}
+
+impl<T> Default for SearchResults<T> {
+  fn default() -> Self {
+    Self {
+      approximate_nearest_neighbors: Vec::new(),
+      visited_nodes: HashSet::new(),
+      visited_node_distances_to_q: HashMap::new(),
+    }
+  }
 }
 
 /// Constructs an exact k-nn graph on the given IDs. O(n^2).
@@ -1239,7 +1394,7 @@ mod tests {
 
   fn mk_config<'a, T>(
     capacity: u32,
-    dist_fn: &'a dyn Fn(&T, &T) -> f32,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   ) -> KNNGraphConfig<'a, T, NHH> {
     let out_degree = 5;
     let num_searchers = 5;
@@ -1596,5 +1751,49 @@ mod tests {
         );
       }
     }
+  }
+
+  #[test]
+  fn test_search_results_merge() {
+    let sr1: SearchResults<u32> = SearchResults {
+      approximate_nearest_neighbors: vec![
+        SearchResult { item: 1, dist: 1.0 },
+        SearchResult { item: 2, dist: 2.0 },
+      ],
+      visited_nodes: HashSet::from([1, 2, 3]),
+      visited_node_distances_to_q: HashMap::from([
+        (1, 1.0),
+        (2, 2.0),
+        (3, 3.0),
+      ]),
+    };
+    let sr2: SearchResults<u32> = SearchResults {
+      approximate_nearest_neighbors: vec![
+        SearchResult { item: 3, dist: 3.0 },
+        SearchResult { item: 4, dist: 4.0 },
+      ],
+      visited_nodes: HashSet::from([1, 3, 4]),
+      visited_node_distances_to_q: HashMap::from([
+        (1, 1.0),
+        (3, 3.0),
+        (4, 4.0),
+      ]),
+    };
+
+    let sr3 = sr1.merge(&sr2);
+    assert_eq!(
+      sr3.approximate_nearest_neighbors,
+      vec![
+        SearchResult { item: 1, dist: 1.0 },
+        SearchResult { item: 2, dist: 2.0 },
+        SearchResult { item: 3, dist: 3.0 },
+        SearchResult { item: 4, dist: 4.0 },
+      ]
+    );
+    assert_eq!(sr3.visited_nodes, HashSet::from([1, 2, 3, 4]),);
+    assert_eq!(
+      sr3.visited_node_distances_to_q,
+      HashMap::from([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0),]),
+    );
   }
 }
