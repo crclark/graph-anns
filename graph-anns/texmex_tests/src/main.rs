@@ -516,6 +516,7 @@ impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
     let mut graphs = Vec::with_capacity(n as usize);
     for i in 0..n {
       let mut config = config.clone();
+      config.capacity = individual_capacity;
       graphs.push(RwLock::new(KNN::new(config)));
     }
     ManyKNN { graphs }
@@ -582,7 +583,7 @@ fn load_texmex_to_dense_par<'a>(
   let build_hasher = RandomState::new();
 
   let config = KNNGraphConfig::new(
-    subset_size / num_graphs as u32,
+    subset_size as u32,
     7,
     7,
     dist_fn,
