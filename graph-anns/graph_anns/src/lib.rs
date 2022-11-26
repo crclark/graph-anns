@@ -490,7 +490,7 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// graph are given by self.mapping.internal_to_external_ids.keys().
   pub num_vertices: u32,
   /// The underlying buffer of capacity*out_degree neighbor information.
-  /// An adjacency list of (node id, distance, lambda crowding factor.
+  /// An adjacency list of (node id, distance, lambda crowding factor).
   /// Use with caution.
   /// Prefer to use get_edges to access the neighbors of a vertex.
   pub edges: Vec<(u32, f32, u8)>,
@@ -949,9 +949,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         if !visited.contains(&e_ext) {
           visited.insert(e_ext.clone());
           let e_dist = (self.config.dist_fn)(&q, e_ext);
-          let f_dist = (self.config.dist_fn)(&q, &f.item);
           visited_distances.insert(e_ext.clone(), e_dist);
-          if e_dist < f_dist || q_max_heap.len() < max_results {
+          if e_dist < f.dist || q_max_heap.len() < max_results {
             q_max_heap.push(SearchResult::new(e_ext.clone(), e_dist));
             r_min_heap.push(Reverse(SearchResult::new(e_ext.clone(), e_dist)));
           }

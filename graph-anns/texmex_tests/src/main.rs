@@ -413,6 +413,7 @@ fn load_texmex_to_dense<'a>(
     "Finished building the nearest neighbors graph in {:?}",
     start_inserting.elapsed()
   );
+  println!("Graph size: {:?}", g.debug_size_stats());
   g
 }
 
@@ -451,12 +452,12 @@ fn main_serial() {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
-  let subset_size: u32 = 1000_000;
+  let subset_size: u32 = 5_000_000;
   let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
   let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1M.ivecs_array");
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
@@ -644,6 +645,27 @@ fn main() {
   println!("Recall@10: {}", recall);
   pause()
 }
+
+// TODO: parallel version appears to use more memory than single-threaded version
+// and I am not sure why.
+// For subset_size = 5M and num_graphs = 32,
+// parallel version is: 83s to build graph, 1.9G res, 122.0 virt
+// single threaded version is: 1791s to build graph, 1.9G res, 122.0 virt
+// never mind; I guess I imagined it.
+
+// TODO: fine-grained parallel insertion? Would this be helpful in some way?
+// We could make an insert_batch() API that runs all the searches for the batch
+// in parallel, then inserts each one serially. The only benefit I can see for
+// that is that we could be parallel within a single partition of the data
+// structure, which could allow us to keep memory usage low by writing partitions
+// to disk after they have reached a certain size. However, we would still need
+// them all in memory at query time, so I don't see a big advantage to this.
+// Parallelism would also be limited by the sequential insertion, which is
+// able to be parallelized across partitions with our current approach.
+
+// TODO: NVMe works best with high queue depths. Should we expose a prefetch
+// callback to the user, which we call as soon as we know we are going to
+// call the distance function on an item?
 
 // test to make sure I understand how to share a vec of atomics between threads.
 
