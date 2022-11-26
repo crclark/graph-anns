@@ -667,6 +667,17 @@ fn main() {
 // callback to the user, which we call as soon as we know we are going to
 // call the distance function on an item?
 
+// TODO: other optimization ideas:
+// - try BTreeMap for external and internal mappings -- might be more space
+// efficient, might be faster in time, too.
+// - Try to find a way to avoid storing two copies of the external id for the
+// internal/external maps. Is there a bidi map that can avoid extra copies of
+// the k/v?
+// - Eliminate the temporary SetU32 in query_internal (r_nbrs)
+// - Replace random selection of starting points in each query with
+// reservoir-sampled selection of starting points. Eventually this could be
+// replaced with smarter pivot selection algorithms.
+
 // test to make sure I understand how to share a vec of atomics between threads.
 
 // TODO: https://travisdowns.github.io/blog/2020/07/06/concurrency-costs.html
