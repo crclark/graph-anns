@@ -448,7 +448,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
   num_correct as f32 / query_vecs.num_rows as f32
 }
 
-fn main_serial() {
+fn main() {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
@@ -626,7 +626,7 @@ fn load_texmex_to_dense_par<'a>(
   g
 }
 
-fn main() {
+fn main_par() {
   // NOTE: change gnd_path when you change this
   let subset_size: u32 = 5_000_000;
   let num_graphs: u32 = 32;
@@ -670,11 +670,12 @@ fn main() {
 
 // TODO: other optimization ideas:
 // - try BTreeMap for external and internal mappings -- might be more space
-// efficient, might be faster in time, too.
+// efficient, might be faster in time, too. DONE, much slower, no memory savings.
 // - Try to find a way to avoid storing two copies of the external id for the
 // internal/external maps. Is there a bidi map that can avoid extra copies of
 // the k/v?
-// - Eliminate the temporary SetU32 in query_internal (r_nbrs)
+// - Eliminate the temporary SetU32 in query_internal (r_nbrs). DONE, 10% speedup.
+// - Use a vec for the internal to external mapping. DONE, good speedup, 10% memory savings.
 // - Replace random selection of starting points in each query with
 // reservoir-sampled selection of starting points. Eventually this could be
 // replaced with smarter pivot selection algorithms.
