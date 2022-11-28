@@ -19,10 +19,10 @@ use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
-use std::io;
 use std::path::Path;
 use std::sync::RwLock;
 use std::time::Instant;
+use std::{io, mem};
 use texmex::ID;
 
 use std::io::prelude::*;
@@ -223,7 +223,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
   num_correct as f32 / query_vecs.num_rows as f32
 }
 
-fn main() {
+fn main_serial() {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
@@ -348,6 +348,13 @@ impl<
   }
 }
 
+#[repr(C, packed)]
+struct Test {
+  a: u32,
+  b: f32,
+  d: u8,
+}
+
 fn load_texmex_to_dense_par<'a>(
   subset_size: u32,
   num_graphs: u32,
@@ -357,9 +364,74 @@ fn load_texmex_to_dense_par<'a>(
 
   let build_hasher = RandomState::new();
 
+  let out_degree = 7u8;
+  println!(
+    "Size of edges array will be {}",
+    out_degree as usize
+      * subset_size as usize
+      * mem::size_of::<(u32, f32, u8)>() as usize
+  );
+
+  println!(
+    "If we used a custom struct with packed, it would be {}",
+    out_degree as usize
+      * subset_size as usize
+      * mem::size_of::<Test>() as usize
+  );
+
+  println!(
+    "If we switched to Vec<(u32, f32)>, Vec<u8>, it would be {}",
+    out_degree as usize
+      * subset_size as usize
+      * mem::size_of::<(u32, f32)>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
+  println!(
+    "If we switched to Vec<(u32, f16)>, Vec<u8>, it would be {}",
+    out_degree as usize
+      * subset_size as usize
+      * mem::size_of::<(u32, u16)>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
+  println!(
+    "If we switched to struct of arrays, it would be {}",
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<f32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
+  println!(
+    "If we switched to f16 stored distances, it would be {}",
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u16>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
+  println!(
+    "If we always recomputed distances and didn't store them, it would be {}",
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
   let config = KNNGraphConfig::new(
     subset_size as u32,
-    7,
+    out_degree,
     7,
     dist_fn,
     build_hasher,
@@ -400,9 +472,9 @@ fn load_texmex_to_dense_par<'a>(
   g
 }
 
-fn main_par() {
+fn main() {
   // NOTE: change gnd_path when you change this
-  let subset_size: u32 = 5_000_000;
+  let subset_size: u32 = 1_000_000_000;
   let num_graphs: u32 = 32;
   let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
@@ -453,6 +525,28 @@ fn main_par() {
 // - Replace random selection of starting points in each query with
 // reservoir-sampled selection of starting points. Eventually this could be
 // replaced with smarter pivot selection algorithms.
+
+// TODO: memory optimization. The main candidate for optimization is the edges
+// // vec. For 1B points with out_degree 7, we have:
+// Size of edges array will be 84000000000
+// If we used a custom struct with packed, it would be 63000000000
+// If we switched to Vec<(u32, f32)>, Vec<u8>, it would be 63000000000
+// If we switched to Vec<(u32, f16)>, Vec<u8>, it would be 63000000000
+// If we switched to struct of arrays, it would be 63000000000
+// If we switched to f16 stored distances, it would be 49000000000
+// If we always recomputed distances and didn't store them, it would be 35000000000
+//
+// There are performance tradeoffs for all of these: cache locality is better if
+// we keep it as-is (index, distance, crowding factor stored together). If we
+// use packed, we have the performance penalty of unaligned accesses. However,
+// we need to consider how often we actually use all of the elements of the tuples
+// we have today... maybe the cache "locality" we think we are getting is
+// actually a waste, because we don't always use all the tuple elements.
+//
+// We should also consider the performance benefit of using less memory: this
+// means we can increase out_degree, which improves recall. of course, the
+// better way to do that is to buy more RAM, so that shouldn't be an overwhelming
+// consideration.
 
 // test to make sure I understand how to share a vec of atomics between threads.
 
