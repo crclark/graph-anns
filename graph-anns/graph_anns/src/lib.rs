@@ -1,13 +1,8 @@
 #![feature(is_sorted)]
-extern crate indexmap;
-extern crate nohash_hasher;
 extern crate rand;
 extern crate rand_xoshiro;
 extern crate tinyset;
 
-use indexmap::map::IndexMap;
-use nohash_hasher::BuildNoHashHasher;
-use rand::seq::index::sample;
 use rand::thread_rng;
 use rand::RngCore;
 use std::cmp::Ordering;
@@ -187,22 +182,21 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
   ) -> SearchResults<T> {
     let mut nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>> =
       BinaryHeap::new();
-    let mut visited_nodes: HashSet<T> = HashSet::new();
-    let mut visited_node_distances_to_q: HashMap<T, f32> = HashMap::default();
+    let mut visited_nodes = Vec::new();
     for x in self.contents.iter() {
       let dist = (self.distance)(x, &q);
-      visited_nodes.insert(*x);
-      nearest_neighbors_max_dist_heap.push(SearchResult::new(*x, dist));
+      let search_result = SearchResult::new(*x, None, dist);
+      visited_nodes.push(search_result);
+      nearest_neighbors_max_dist_heap.push(search_result);
       if nearest_neighbors_max_dist_heap.len() >= max_results {
         nearest_neighbors_max_dist_heap.pop();
       }
-      visited_node_distances_to_q.insert(*x, dist);
     }
     SearchResults {
       approximate_nearest_neighbors: nearest_neighbors_max_dist_heap
         .into_sorted_vec(),
       visited_nodes,
-      visited_node_distances_to_q,
+      visited_nodes_distances_to_q: HashMap::new(),
     }
   }
 }
@@ -811,6 +805,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         if !self.exists_edge(int_id, *w) {
           ret.push(Reverse(SearchResult {
             item: *w,
+            internal_id: Some(*w),
             dist: v_dist + w_dist,
           }));
         }
@@ -858,16 +853,17 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     self: &mut DenseKNNGraph<'a, T, S>,
     q: T,
     q_int: u32,
-    visited_nodes: &HashSet<T>,
-    visited_nodes_distance_to_q: &HashMap<T, f32>,
+    visited_nodes: &Vec<SearchResult<T>>,
+    visited_nodes_distances_to_q: &HashMap<u32, (T, f32)>,
   ) -> () {
     let mut w = VecDeque::new();
-    for r in visited_nodes {
-      w.push_back((
-        self.mapping.ext_to_int(r).clone(),
-        0,
-        visited_nodes_distance_to_q.get(r).unwrap(),
-      ));
+    for SearchResult {
+      item: _,
+      internal_id,
+      dist,
+    } in visited_nodes
+    {
+      w.push_back((internal_id.unwrap(), 0, dist));
     }
 
     let mut already_rrnped = HashSet::new();
@@ -878,7 +874,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       if depth < self.config.rrnp_max_depth && dist_s_q < &dist_s_f {
         for (e, _) in self.in_and_out_neighbors(s_int) {
           let e_ext = self.mapping.int_to_ext(e);
-          if !already_rrnped.contains(&e) && !visited_nodes.contains(&e_ext) {
+          if !already_rrnped.contains(&e)
+            && !visited_nodes_distances_to_q.contains_key(&e)
+          {
             already_rrnped.insert(e);
             let dist_e_q = (self.config.dist_fn)(&e_ext, &q);
             self.insert_edge_if_closer(e, q_int, dist_e_q);
@@ -902,19 +900,18 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     sum / self.config.out_degree as f32
   }
 
-  fn query_internal<R: RngCore>(
+  fn query_internal(
     &self,
     q: &T,
     max_results: usize,
-    prng: &mut R,
     ignore_occluded: bool,
   ) -> SearchResults<T> {
     assert!(self.config.num_searchers <= self.num_vertices);
     let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
     let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
       BinaryHeap::new();
-    let mut visited = HashSet::<T>::new();
-    let mut visited_distances: HashMap<T, f32> = HashMap::default();
+    let mut visited = HashSet::<u32>::new();
+    let mut visited_distances: HashMap<u32, (T, f32)> = HashMap::default();
 
     // Initialize our search with num_searchers initial points.
     // lines 2 to 10 of the pseudocode
@@ -923,28 +920,33 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // TODO: create a test case that fails because of this before fixing it. It
     // will make a good regression test.
     assert!(self.starting_points_reservoir_sample.len() > 0);
-    for StartPoint {
-      id: r_index_into_hashmap,
-      ..
-    } in &self.starting_points_reservoir_sample
-    {
-      let r_ext = self.mapping.internal_to_external_ids
-        [*r_index_into_hashmap as usize]
-        .as_ref()
-        .unwrap();
+    for StartPoint { id: r_int, .. } in &self.starting_points_reservoir_sample {
+      let r_ext = self.mapping.int_to_ext(*r_int);
       let r_dist = (self.config.dist_fn)(&q, &r_ext);
-      visited.insert(r_ext.clone());
-      visited_distances.insert(r_ext.clone(), r_dist);
-      r_min_heap.push(Reverse(SearchResult::new(r_ext.clone(), r_dist)));
+      visited.insert(*r_int);
+      visited_distances.insert(*r_int, (r_ext.clone(), r_dist));
+      r_min_heap.push(Reverse(SearchResult::new(
+        r_ext.clone(),
+        Some(*r_int),
+        r_dist,
+      )));
       match q_max_heap.peek() {
         None => {
-          q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
+          q_max_heap.push(SearchResult::new(
+            r_ext.clone(),
+            Some(*r_int),
+            r_dist,
+          ));
           // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
           // We are skipping it here since we did it above.
         }
         Some(f) => {
           if r_dist < f.dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(r_ext.clone(), r_dist));
+            q_max_heap.push(SearchResult::new(
+              r_ext.clone(),
+              Some(*r_int),
+              r_dist,
+            ));
           }
         }
       }
@@ -978,22 +980,33 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
       for e in r_nbrs_iter {
         let e_ext = self.mapping.int_to_ext(e);
-        if !visited.contains(&e_ext) {
-          visited.insert(e_ext.clone());
+        if !visited.contains(&e) {
+          visited.insert(e);
           let e_dist = (self.config.dist_fn)(&q, e_ext);
-          visited_distances.insert(e_ext.clone(), e_dist);
+          visited_distances.insert(e, (e_ext.clone(), e_dist));
           if e_dist < f.dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(e_ext.clone(), e_dist));
-            r_min_heap.push(Reverse(SearchResult::new(e_ext.clone(), e_dist)));
+            q_max_heap.push(SearchResult::new(e_ext.clone(), Some(e), e_dist));
+            r_min_heap.push(Reverse(SearchResult::new(
+              e_ext.clone(),
+              Some(e),
+              e_dist,
+            )));
           }
         }
       }
     }
 
+    // construct the visited vec from visited and visited_distances
+    let mut visited_vec: Vec<SearchResult<T>> = Vec::new();
+    for i_int in visited {
+      let (i_ext, i_dist) = visited_distances.get(&i_int).unwrap();
+      visited_vec.push(SearchResult::new(i_ext.clone(), Some(i_int), *i_dist));
+    }
+
     SearchResults {
       approximate_nearest_neighbors: q_max_heap.into_sorted_vec(),
-      visited_nodes: visited,
-      visited_node_distances_to_q: visited_distances,
+      visited_nodes: visited_vec,
+      visited_nodes_distances_to_q: visited_distances,
     }
   }
 
@@ -1059,11 +1072,10 @@ macro_rules! get_edges_mut_macro {
   };
 }
 
-fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>(
+fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash>(
   r_edges: &mut [(u32, f32, u8)],
-  mapping: &InternalExternalIDMapping<T, S>,
   q_int: u32,
-  visited_node_distances_to_q: &HashMap<T, f32>,
+  visited_node_distances_to_q: &HashMap<u32, (T, f32)>,
 ) {
   let q_ix = r_edges.iter().position(|e| e.0 == q_int).unwrap();
   let q_r_dist = r_edges[q_ix].1;
@@ -1072,21 +1084,20 @@ fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>(
 
   for s_ix in 0..r_edges.len() {
     let (s_int, s_r_dist, _) = r_edges[s_ix];
-    let s_ext = mapping.int_to_ext(s_int);
-    let s_q_dist = visited_node_distances_to_q.get(&s_ext);
+    let s_q_dist = visited_node_distances_to_q.get(&s_int).map(|d| d.1);
 
     match s_q_dist {
       Some(s_q_dist) => {
         // rule 1 from the paper
-        if s_r_dist < q_r_dist && s_q_dist >= &q_r_dist {
+        if s_r_dist < q_r_dist && s_q_dist >= q_r_dist {
           continue;
         }
         // rule 2 from the paper
-        else if s_r_dist < q_r_dist && s_q_dist < &q_r_dist {
+        else if s_r_dist < q_r_dist && s_q_dist < q_r_dist {
           r_edges[q_ix].2 += 1;
         }
         // rule 3 from the paper: s_r_dist > q_r_dist, q occludes s
-        else if s_q_dist < &s_r_dist {
+        else if s_q_dist < s_r_dist {
           r_edges[s_ix].2 += 1;
         }
       }
@@ -1114,30 +1125,33 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
       visited_nodes,
-      visited_node_distances_to_q,
-    } = self.query_internal(&q, self.config.out_degree as usize, prng, false);
+      visited_nodes_distances_to_q,
+    } = self.query_internal(&q, self.config.out_degree as usize, false);
 
     let (neighbors, dists) = nearest_neighbors
       .iter()
-      .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
+      .map(|sr| (sr.internal_id.unwrap(), sr.dist))
       .unzip();
     let q_int = self.mapping.insert(&q);
     self.insert_vertex(q_int, neighbors, dists);
 
-    for r in &visited_nodes {
-      let r_int = self.mapping.ext_to_int(&r).clone();
-      let is_inserted = self.insert_edge_if_closer(
-        r_int,
-        q_int,
-        visited_node_distances_to_q[&r],
-      );
+    for SearchResult {
+      item: _,
+      internal_id: r_int,
+      dist: r_dist,
+    } in &visited_nodes
+    {
+      let r_int = r_int.unwrap();
+      // TODO: collect stats on how often is_inserted is true and how many
+      // times we call insert_edge_if_closer. This could be a big waste of time.
+      let is_inserted = self.insert_edge_if_closer(r_int, q_int, *r_dist);
       let r_edges = get_edges_mut_macro!(self, r_int);
       if is_inserted && self.config.use_lgd {
-        apply_lgd(r_edges, &self.mapping, q_int, &visited_node_distances_to_q);
+        apply_lgd(r_edges, q_int, &visited_nodes_distances_to_q);
       }
     }
     if self.config.use_rrnp {
-      self.rrnp(q, q_int, &visited_nodes, &visited_node_distances_to_q);
+      self.rrnp(q, q_int, &visited_nodes, &visited_nodes_distances_to_q);
     }
     self.maybe_insert_starting_point(q_int, prng);
   }
@@ -1200,7 +1214,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                   // node being deleted, or referrer itself, so we search for
                   // one more than that number.
                   self.config.out_degree as usize + 3,
-                  &mut thread_rng(),
                   false, // we need all the results we can find, so don't ignore occluded nodes
                 );
 
@@ -1290,21 +1303,32 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     &self,
     q: &T,
     max_results: usize,
-    prng: &mut R,
+    _prng: &mut R,
   ) -> SearchResults<T> {
-    self.query_internal(q, max_results, prng, true)
+    self.query_internal(q, max_results, true)
   }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SearchResult<T> {
+  /// The user-provided item.
   pub item: T,
+  /// The internal identifier for this item within the graph. This will be None
+  /// if the graph is small and using the brute force algorithm (internally, we
+  /// convert from brute force to a nearest-neighbor graph after a small number
+  /// of items have been inserted).
+  pub internal_id: Option<u32>,
+  /// The distance from the query point to this item.
   pub dist: f32,
 }
 
 impl<T> SearchResult<T> {
-  pub fn new(item: T, dist: f32) -> SearchResult<T> {
-    Self { item, dist }
+  pub fn new(item: T, internal_id: Option<u32>, dist: f32) -> SearchResult<T> {
+    Self {
+      item,
+      internal_id,
+      dist,
+    }
   }
 }
 
@@ -1332,15 +1356,13 @@ impl<T> Ord for SearchResult<T> {
 pub struct SearchResults<T> {
   /// Results of the search, in order of increasing distance from the query.
   pub approximate_nearest_neighbors: Vec<SearchResult<T>>,
-  // TODO: allow user to optimize this with nohash_hasher somehow.
-  // either allow them to pass in a hasher, or use specializations.
-  // The former complicates the API but is more extensible.
-  // TODO: consolidate visited_nodes and visited_nodes_distance_to_q into one
-  // vec of SearchResults.
-  /// Set of nodes visited during the search. Most users won't need this info.
-  pub visited_nodes: HashSet<T>,
-  /// Distances of the nodes in visited_nodes to the query point.
-  pub visited_node_distances_to_q: HashMap<T, f32>,
+  /// All nodes visited during the search. Most users won't need this info.
+  pub visited_nodes: Vec<SearchResult<T>>,
+  /// The same info as visited_nodes, but stored as a map from internal id.
+  /// Used for some internal operations; probably not useful for users. This
+  /// will be empty if the data structure is small (using the brute force
+  /// algorithm), because the brute force algorithm doesn't assign internal ids.
+  pub visited_nodes_distances_to_q: HashMap<u32, (T, f32)>,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
@@ -1362,8 +1384,12 @@ impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
       .sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
     merged.visited_nodes.extend(other.visited_nodes.clone());
     merged
-      .visited_node_distances_to_q
-      .extend(other.visited_node_distances_to_q.clone());
+      .visited_nodes
+      .sort_by(|a, b| a.internal_id.partial_cmp(&b.internal_id).unwrap());
+    merged.visited_nodes.dedup_by_key(|x| x.internal_id);
+    merged
+      .visited_nodes_distances_to_q
+      .extend(other.visited_nodes_distances_to_q.clone());
     merged
   }
 }
@@ -1372,8 +1398,8 @@ impl<T> Default for SearchResults<T> {
   fn default() -> Self {
     Self {
       approximate_nearest_neighbors: Vec::new(),
-      visited_nodes: HashSet::new(),
-      visited_node_distances_to_q: HashMap::new(),
+      visited_nodes: Vec::new(),
+      visited_nodes_distances_to_q: HashMap::new(),
     }
   }
 }
@@ -1412,14 +1438,14 @@ pub fn exhaustive_knn_graph<
       }
       let j = g.mapping.insert(*j_ext);
       let dist = (config.dist_fn)(i_ext, j_ext);
-      knn.push(SearchResult::new(j, dist));
+      knn.push(SearchResult::new(j, Some(j), dist));
 
       while knn.len() > config.out_degree as usize {
         knn.pop();
       }
     }
     for edge_ix in 0..config.out_degree as usize {
-      let SearchResult { item: id, dist } = knn.pop().unwrap();
+      let SearchResult { item: id, dist, .. } = knn.pop().unwrap();
       g.edges[(i as usize * config.out_degree as usize + edge_ix)] =
         (id, dist, DEFAULT_LAMBDA);
       let s = &mut g.backpointers[id as usize];
@@ -1438,12 +1464,13 @@ pub fn exhaustive_knn_graph<
 
 #[cfg(test)]
 mod tests {
+  extern crate nohash_hasher;
   extern crate ordered_float;
   use std::{collections::hash_map::RandomState, hash::BuildHasherDefault};
 
+  use self::nohash_hasher::NoHashHasher;
   use self::ordered_float::OrderedFloat;
   use super::*;
-  use nohash_hasher::NoHashHasher;
   use rand::SeedableRng;
   use rand_xoshiro::Xoshiro256StarStar;
 
@@ -1861,26 +1888,74 @@ mod tests {
   fn test_search_results_merge() {
     let sr1: SearchResults<u32> = SearchResults {
       approximate_nearest_neighbors: vec![
-        SearchResult { item: 1, dist: 1.0 },
-        SearchResult { item: 2, dist: 2.0 },
+        SearchResult {
+          item: 1,
+          internal_id: Some(1),
+          dist: 1.0,
+        },
+        SearchResult {
+          item: 2,
+          internal_id: Some(2),
+          dist: 2.0,
+        },
       ],
-      visited_nodes: HashSet::from([1, 2, 3]),
-      visited_node_distances_to_q: HashMap::from([
-        (1, 1.0),
-        (2, 2.0),
-        (3, 3.0),
+      visited_nodes: vec![
+        SearchResult {
+          item: 1,
+          internal_id: Some(1),
+          dist: 1.0,
+        },
+        SearchResult {
+          item: 2,
+          internal_id: Some(2),
+          dist: 2.0,
+        },
+        SearchResult {
+          item: 3,
+          internal_id: Some(3),
+          dist: 3.0,
+        },
+      ],
+      visited_nodes_distances_to_q: HashMap::from([
+        (1, (1, 1.0)),
+        (2, (2, 2.0)),
+        (3, (3, 3.0)),
       ]),
     };
     let sr2: SearchResults<u32> = SearchResults {
       approximate_nearest_neighbors: vec![
-        SearchResult { item: 3, dist: 3.0 },
-        SearchResult { item: 4, dist: 4.0 },
+        SearchResult {
+          item: 3,
+          internal_id: Some(3),
+          dist: 3.0,
+        },
+        SearchResult {
+          item: 4,
+          internal_id: Some(4),
+          dist: 4.0,
+        },
       ],
-      visited_nodes: HashSet::from([1, 3, 4]),
-      visited_node_distances_to_q: HashMap::from([
-        (1, 1.0),
-        (3, 3.0),
-        (4, 4.0),
+      visited_nodes: vec![
+        SearchResult {
+          item: 1,
+          internal_id: Some(1),
+          dist: 1.0,
+        },
+        SearchResult {
+          item: 3,
+          internal_id: Some(3),
+          dist: 3.0,
+        },
+        SearchResult {
+          item: 4,
+          internal_id: Some(4),
+          dist: 4.0,
+        },
+      ],
+      visited_nodes_distances_to_q: HashMap::from([
+        (1, (1, 1.0)),
+        (3, (3, 3.0)),
+        (4, (4, 4.0)),
       ]),
     };
 
@@ -1888,16 +1963,61 @@ mod tests {
     assert_eq!(
       sr3.approximate_nearest_neighbors,
       vec![
-        SearchResult { item: 1, dist: 1.0 },
-        SearchResult { item: 2, dist: 2.0 },
-        SearchResult { item: 3, dist: 3.0 },
-        SearchResult { item: 4, dist: 4.0 },
+        SearchResult {
+          item: 1,
+          internal_id: Some(1),
+          dist: 1.0
+        },
+        SearchResult {
+          item: 2,
+          internal_id: Some(2),
+          dist: 2.0
+        },
+        SearchResult {
+          item: 3,
+          internal_id: Some(3),
+          dist: 3.0
+        },
+        SearchResult {
+          item: 4,
+          internal_id: Some(4),
+          dist: 4.0
+        },
       ]
     );
-    assert_eq!(sr3.visited_nodes, HashSet::from([1, 2, 3, 4]),);
     assert_eq!(
-      sr3.visited_node_distances_to_q,
-      HashMap::from([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0),]),
+      sr3.visited_nodes,
+      vec![
+        SearchResult {
+          item: 1,
+          internal_id: Some(1),
+          dist: 1.0,
+        },
+        SearchResult {
+          item: 2,
+          internal_id: Some(2),
+          dist: 2.0,
+        },
+        SearchResult {
+          item: 3,
+          internal_id: Some(3),
+          dist: 3.0,
+        },
+        SearchResult {
+          item: 4,
+          internal_id: Some(4),
+          dist: 4.0,
+        },
+      ],
+    );
+    assert_eq!(
+      sr3.visited_nodes_distances_to_q,
+      HashMap::from([
+        (1, (1, 1.0)),
+        (2, (2, 2.0)),
+        (3, (3, 3.0)),
+        (4, (4, 4.0)),
+      ]),
     );
   }
 }
