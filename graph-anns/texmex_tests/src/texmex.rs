@@ -87,19 +87,6 @@ impl PrimitiveToF32 for f32 {
   }
 }
 
-pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(
-  v1: &[T],
-  v2: &[T],
-) -> f32 {
-  let mut result = 0.0;
-  let n = v1.len();
-  for i in 0..n {
-    let diff = v2[i].tof32() - v1[i].tof32();
-    result += diff * diff;
-  }
-  result
-}
-
 // NOTE: this gets auto-vectorized at opt-level 3 and is fastest
 pub fn sq_euclidean_iter(v1: &[u8], v2: &[u8]) -> f32 {
   v1.iter().zip(v2.iter()).fold(0i32, |acc, (x, y)| {
