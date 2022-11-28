@@ -524,7 +524,26 @@ fn main() {
 // - Use a vec for the internal to external mapping. DONE, good speedup, 10% memory savings.
 // - Replace random selection of starting points in each query with
 // reservoir-sampled selection of starting points. Eventually this could be
-// replaced with smarter pivot selection algorithms.
+// replaced with smarter pivot selection algorithms. DONE as part of switch to vec
+// for int_to_ext mapping. Unclear if this had a performance impact outside of
+// the 10% speedup from using a vec for int_to_ext.
+// - Analyze the behavior of the algorithm itself and devise improvements and
+// novel extensions. Open questions:
+//   - Does including backpointers in the search improve search performance?
+//   - How much does distance to the best-so-far decrease on each iteration?
+//   - Do long-distance jumps (or random restarts) help performance?
+//   - How many nodes do we visit per query?
+//   - Can we learn better starting points based on our query patterns? For
+//     example, does starting at recent query points help? Or can we find
+//     frequently-visited points and use them as starting points?
+//   - Can we avoid tracking already-traversed nodes by ensuring our algorithm
+//     always moves in the direction of decreasing distance?
+//   - Does a greater number of starting points even help performance (recall@n)? Early
+//     evidence suggests the answer is no, so does reducing the number of starting points
+//     reduce query latency? Note that this may be dataset-specific -- I can imagine that
+//     having one starting point per cluster could really help performance.
+//   - Can we use the triangle inequality to reduce distance calls?
+//   - Can we find a more clever stopping condition that allows us to stop earlier?
 
 // TODO: memory optimization. The main candidate for optimization is the edges
 // // vec. For 1B points with out_degree 7, we have:
