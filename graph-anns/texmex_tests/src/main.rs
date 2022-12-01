@@ -544,6 +544,11 @@ fn main() {
 //     having one starting point per cluster could really help performance.
 //   - Can we use the triangle inequality to reduce distance calls?
 //   - Can we find a more clever stopping condition that allows us to stop earlier?
+//   - Why does increasing out_degree improve recall@n so much, anyway? I thought
+//     it would simply affect query latency. Find the answer.
+//   - store fp16 floats. Recompute distances in cases where the precision loss
+//     was so large that two floats can't be properly compared. Or maybe even
+//     don't do that; this is approximate nearest neighbors, after all.
 
 // TODO: memory optimization. The main candidate for optimization is the edges
 // // vec. For 1B points with out_degree 7, we have:
