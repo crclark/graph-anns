@@ -1,7 +1,10 @@
 #![feature(is_sorted)]
 extern crate rand;
 extern crate rand_xoshiro;
+extern crate soa_derive;
 extern crate tinyset;
+
+use soa_derive::StructOfArray;
 
 use rand::thread_rng;
 use rand::RngCore;
@@ -490,6 +493,13 @@ impl Ord for StartPoint {
   }
 }
 
+#[derive(StructOfArray)]
+pub struct Edge {
+  to: u32,
+  distance: f32,
+  crowding_factor: u8,
+}
+
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
@@ -504,7 +514,7 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// An adjacency list of (node id, distance, lambda crowding factor).
   /// Use with caution.
   /// Prefer to use get_edges to access the neighbors of a vertex.
-  pub edges: Vec<(u32, f32, u8)>,
+  pub edges: EdgeVec,
   /// Maintains an association between vertices and the vertices that link out to
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
@@ -566,12 +576,19 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       config.build_hasher.clone(),
     );
 
-    // TODO: splitting this into three vecs would allow at least the first one
-    // to specialize to calloc and potentially be a lot faster.
-    let edges = vec![
-      (0, 0.0, DEFAULT_LAMBDA);
-      config.capacity as usize * config.out_degree as usize
-    ];
+    let to = vec![0; config.capacity as usize * config.out_degree as usize];
+
+    let distance =
+      vec![0.0; config.capacity as usize * config.out_degree as usize];
+
+    let crowding_factor =
+      vec![0; config.capacity as usize * config.out_degree as usize];
+
+    let edges = EdgeVec {
+      to,
+      distance,
+      crowding_factor,
+    };
 
     let mut backpointers = Vec::with_capacity(config.capacity as usize);
 
@@ -595,7 +612,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
   /// Get the neighbors of u and their distances. Panics if index
   /// >= capacity or does not exist.
-  pub fn get_edges(&self, index: u32) -> &[(u32, f32, u8)] {
+  pub fn get_edges(&self, index: u32) -> EdgeSlice {
     assert!(
       index < self.config.capacity,
       "index {} out of bounds",
@@ -609,26 +626,52 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
     let i = index * self.config.out_degree as u32;
     let j = i + self.config.out_degree as u32;
-    &self.edges[i as usize..j as usize]
+    self.edges.slice(i as usize..j as usize)
   }
 
   fn debug_get_neighbor_indices(&self, index: u32) -> Vec<u32> {
-    self.get_edges(index).iter().map(|e| e.0).collect()
+    self
+      .get_edges(index)
+      .iter()
+      .map(|e| *e.to)
+      .collect::<Vec<_>>()
   }
 
   /// Get the neighbors of u and their distances. Panics if index
   /// >= capacity or does not exist.
-  fn get_edges_mut(&mut self, index: u32) -> &mut [(u32, f32, u8)] {
+  fn get_edges_mut(&mut self, index: u32) -> EdgeSliceMut {
     assert!(index < self.config.capacity);
 
     let i = index * self.config.out_degree as u32;
     let j = i + self.config.out_degree as u32;
-    &mut self.edges[i as usize..j as usize]
+    self.edges.slice_mut(i as usize..j as usize)
   }
 
   fn sort_edges(&mut self, index: u32) {
-    let edges = self.get_edges_mut(index);
-    edges.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut edges = self.get_edges_mut(index);
+    //TODO: allocating a new vec and edges is absolutely horrible for performance.
+    // Implement sort manually
+    // if necessary, but try to find a library that has a generic enough sort
+    // implementation.
+    let mut tmp_edges_vec: Vec<Edge> = Vec::<Edge>::new();
+    for e in edges.iter() {
+      tmp_edges_vec.push(Edge {
+        to: *e.to,
+        distance: *e.distance,
+        crowding_factor: *e.crowding_factor,
+      })
+    }
+    tmp_edges_vec.sort_by(|a, b| {
+      let b_dist = b.distance;
+      a.distance.total_cmp(&b_dist)
+    });
+
+    for i in 0..tmp_edges_vec.len() {
+      let mut e = edges.get_mut(i).unwrap();
+      *e.to = tmp_edges_vec[i].to;
+      *e.distance = tmp_edges_vec[i].distance;
+      *e.crowding_factor = tmp_edges_vec[i].crowding_factor;
+    }
   }
 
   /// Get distance in terms of two internal ids. Panics if internal ids do not
@@ -652,12 +695,17 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     w: u32,
     u_w_dist: f32,
   ) {
-    let u_edges = self.get_edges_mut(u);
-    for (edge_ix, edge_dist, edge_lambda) in u_edges.iter_mut() {
-      if *edge_ix == v {
-        *edge_ix = w;
-        *edge_dist = u_w_dist;
-        *edge_lambda = DEFAULT_LAMBDA;
+    let mut u_edges = self.get_edges_mut(u);
+    for EdgeRefMut {
+      to,
+      distance,
+      crowding_factor,
+    } in u_edges.iter_mut()
+    {
+      if *to == v {
+        *to = w;
+        *distance = u_w_dist;
+        *crowding_factor = DEFAULT_LAMBDA;
       }
     }
 
@@ -674,14 +722,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   ///
   /// Returns `true` if the new edge was added.
   fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
-    let most_distant_ix = (self.config.out_degree - 1) as usize;
-    let edges = self.get_edges_mut(from);
+    let mut edges = self.get_edges_mut(from);
+    let most_distant_edge = edges.last_mut().unwrap();
 
-    if dist < edges[most_distant_ix].1 {
-      let old = edges[most_distant_ix].0;
-      edges[most_distant_ix].0 = to;
-      edges[most_distant_ix].1 = dist;
-      edges[most_distant_ix].2 = DEFAULT_LAMBDA;
+    if dist < *most_distant_edge.distance {
+      let old = *most_distant_edge.to;
+      *most_distant_edge.to = to;
+      *most_distant_edge.distance = dist;
+      *most_distant_edge.crowding_factor = DEFAULT_LAMBDA;
       self.sort_edges(from);
       self.backpointers[old as usize].remove(from);
       self.backpointers[to as usize].insert(from);
@@ -711,7 +759,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     );
 
     for ((edge_ix, nbr), dist) in nbrs.iter().enumerate().zip(dists) {
-      self.edges[u as usize * od + edge_ix] = (*nbr, dist, DEFAULT_LAMBDA);
+      let mut u_out_edges = self.get_edges_mut(u);
+      let edge = u_out_edges.get_mut(edge_ix).unwrap();
+      *edge.to = *nbr;
+      *edge.distance = dist;
+      *edge.crowding_factor = DEFAULT_LAMBDA;
       let s = &mut self.backpointers[*nbr as usize];
       s.insert(u);
     }
@@ -724,7 +776,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     println!("### Adjacency list (index, distance, lambda)");
     for i in 0..self.mapping.internal_to_external_ids.len() {
       println!("Node {}", i);
-      println!("{:#?}", self.get_edges(i as u32));
+      println!(
+        "{:#?}",
+        self
+          .get_edges(i as u32)
+          .iter()
+          .map(|e| (e.to, e.distance, e.crowding_factor))
+          .collect::<Vec<_>>()
+      );
     }
     println!("### Backpointers");
     for i in 0..self.mapping.internal_to_external_ids.len() {
@@ -746,20 +805,24 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     }
 
     for i in self.mapping.external_to_internal_ids.values() {
-      for (nbr, _, _) in self.get_edges(*i).iter() {
-        if *nbr == (*i) {
+      for e in self.get_edges(*i).iter() {
+        if *e.to == (*i) {
           panic!("Self loop at node {}", i);
         }
-        let nbr_backptrs = &self.backpointers[*nbr as usize];
+        let nbr_backptrs = &self.backpointers[*e.to as usize];
         if !nbr_backptrs.contains(*i) {
           panic!(
             "Vertex {} links to {} but {}'s backpointers don't include {}!",
-            i, nbr, nbr, i
+            i, *e.to, *e.to, i
           );
         }
       }
 
-      assert!(self.get_edges(*i).is_sorted_by_key(|e| e.1));
+      assert!(self
+        .get_edges(*i)
+        .iter()
+        .map(|e| (*e.to, *e.distance, *e.crowding_factor))
+        .is_sorted_by_key(|e| e.1));
 
       for referrer in self.backpointers[*i as usize].iter() {
         assert!(self.debug_get_neighbor_indices(referrer).contains(&(i)));
@@ -768,8 +831,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 
   fn exists_edge(&self, u: u32, v: u32) -> bool {
-    for (w, _, _) in self.get_edges(u).iter() {
-      if v == *w {
+    for e in self.get_edges(u).iter() {
+      if v == *e.to {
         return true;
       }
     }
@@ -781,11 +844,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   // return n approximate nearest neighbors very fast by using upper bounds on
   // distance in the same way as two_hop_neighbors_and_dist_upper_bounds. Of
   // course, for best results we should be unsharded.
-
-  // TODO: does our new API even support out-of-db queries effectively? The
-  // distance function the user provides takes two ids as input. Make an example
-  // of inserting a few vectors and then querying for neigbors to a novel vector
-  // that doesn't exist in the database.
 
   // TODO: k-nn descent helper so we can optimize the graph with idle CPU.
 
@@ -800,13 +858,13 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     int_id: u32,
   ) -> BinaryHeap<Reverse<SearchResult<u32>>> {
     let mut ret: BinaryHeap<Reverse<SearchResult<u32>>> = BinaryHeap::new();
-    for (v, v_dist, _) in self.get_edges(int_id).iter() {
-      for (w, w_dist, _) in self.get_edges(*v).iter() {
-        if !self.exists_edge(int_id, *w) {
+    for v in self.get_edges(int_id).iter() {
+      for w in self.get_edges(*v.to).iter() {
+        if !self.exists_edge(int_id, *w.to) {
           ret.push(Reverse(SearchResult {
-            item: *w,
-            internal_id: Some(*w),
-            dist: v_dist + w_dist,
+            item: *w.to,
+            internal_id: Some(*w.to),
+            dist: *v.distance + *w.distance,
           }));
         }
       }
@@ -818,27 +876,27 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     self: &DenseKNNGraph<'a, T, S>,
     int_id: u32,
   ) -> (u32, f32) {
-    let last_ix = self.config.out_degree - 1;
-    let (f, dist, _) = self.get_edges(int_id)[last_ix as usize];
-    (f, dist).clone()
+    let e = self.get_edges(int_id).last().unwrap();
+    (*e.to, *e.distance).clone()
   }
 
+  // TODO: return an iterator to avoid allocating a new vec
   fn in_and_out_neighbors(
     self: &DenseKNNGraph<'a, T, S>,
     int_id: u32,
   ) -> Vec<(u32, f32)> {
     let mut ret = Vec::new();
-    for (w, dist, _) in self.get_edges(int_id).iter() {
-      ret.push((*w, dist.clone()));
+    for w in self.get_edges(int_id).iter() {
+      ret.push((*w.to, *w.distance));
     }
     for w in self.backpointers[int_id as usize].iter() {
-      let dist = self
-        .get_edges(w)
+      let w_edges = self.get_edges(w);
+      let dist = w_edges
         .iter()
-        .filter(|e| e.0 == int_id)
+        .filter(|e| *e.to == int_id)
         .next()
         .unwrap()
-        .1;
+        .distance;
       ret.push((w, dist.clone()));
     }
     ret
@@ -894,8 +952,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       return f32::INFINITY;
     }
     let mut sum = 0.0;
-    for (_, _, lambda) in self.get_edges(int_id).iter() {
-      sum += *lambda as f32;
+    for e in self.get_edges(int_id).iter() {
+      sum += *e.crowding_factor as f32;
     }
     sum / self.config.out_degree as f32
   }
@@ -968,14 +1026,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       }
 
       let average_lambda = self.average_occlusion(*sr_int);
+      let sr_edges = self.get_edges(*sr_int);
       let r_nbrs_iter = self.backpointers[*sr_int as usize].iter().chain(
-        self
-          .get_edges(*sr_int)
+        sr_edges
           .iter()
-          .filter(|(_, _, lambda)| {
-            !(ignore_occluded && *lambda as f32 >= average_lambda)
+          .filter(|e| {
+            !(ignore_occluded && *e.crowding_factor as f32 >= average_lambda)
           })
-          .map(|(nbr, _, _)| *nbr),
+          .map(|e| *e.to),
       );
 
       for e in r_nbrs_iter {
@@ -1066,24 +1124,37 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 // TODO: find a better solution.
 macro_rules! get_edges_mut_macro {
   ($self:ident, $index:ident) => {
-    &mut $self.edges[($index as usize * $self.config.out_degree as usize)
-      ..$index as usize * $self.config.out_degree as usize
-        + $self.config.out_degree as usize]
+    &mut $self.edges.slice_mut(
+      ($index as usize * $self.config.out_degree as usize)
+        ..$index as usize * $self.config.out_degree as usize
+          + $self.config.out_degree as usize,
+    )
+  };
+}
+
+macro_rules! get_edges_macro {
+  ($self:ident, $index:ident) => {
+    &$self.edges.slice(
+      ($index as usize * $self.config.out_degree as usize)
+        ..$index as usize * $self.config.out_degree as usize
+          + $self.config.out_degree as usize,
+    )
   };
 }
 
 fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash>(
-  r_edges: &mut [(u32, f32, u8)],
+  r_edges: &mut EdgeSliceMut,
   q_int: u32,
   visited_node_distances_to_q: &HashMap<u32, (T, f32)>,
 ) {
-  let q_ix = r_edges.iter().position(|e| e.0 == q_int).unwrap();
-  let q_r_dist = r_edges[q_ix].1;
+  let q_ix = r_edges.iter().position(|e| *e.to == q_int).unwrap();
+  let q_r_dist = *r_edges.get(q_ix).unwrap().distance;
 
-  r_edges[q_ix].2 = DEFAULT_LAMBDA as u8;
+  *r_edges.get_mut(q_ix).unwrap().crowding_factor = DEFAULT_LAMBDA as u8;
 
   for s_ix in 0..r_edges.len() {
-    let (s_int, s_r_dist, _) = r_edges[s_ix];
+    let s_int = *r_edges.get(s_ix).unwrap().to;
+    let s_r_dist = *r_edges.get(s_ix).unwrap().distance;
     let s_q_dist = visited_node_distances_to_q.get(&s_int).map(|d| d.1);
 
     match s_q_dist {
@@ -1094,11 +1165,11 @@ fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash>(
         }
         // rule 2 from the paper
         else if s_r_dist < q_r_dist && s_q_dist < q_r_dist {
-          r_edges[q_ix].2 += 1;
+          *r_edges.get_mut(q_ix).unwrap().crowding_factor += 1;
         }
         // rule 3 from the paper: s_r_dist > q_r_dist, q occludes s
         else if s_q_dist < s_r_dist {
-          r_edges[s_ix].2 += 1;
+          *r_edges.get_mut(s_ix).unwrap().crowding_factor += 1;
         }
       }
 
@@ -1166,7 +1237,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       Some(&int_id) => {
         let nbrs = get_edges_mut_macro!(self, int_id)
           .iter()
-          .map(|(i, _, _)| *i)
+          .map(|e| *e.to)
           .collect::<Vec<_>>();
         //TODO: using thread_rng is bad, but so is passing a prng into every operation.
         // let's make it part of the config.
@@ -1190,7 +1261,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           // upper bound distance, computed as dist(u,v) + dist(v,w). This
           // requires the triangle inequality to hold for the user's metric
           let referrer_nbrs: HashSet<u32> =
-            self.get_edges(referrer).iter().map(|x| x.0).collect();
+            self.get_edges(referrer).iter().map(|x| *x.to).collect();
           let mut referrer_nbrs_of_nbrs =
             self.two_hop_neighbors_and_dist_upper_bounds(referrer);
 
@@ -1262,9 +1333,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
         }
 
         // Remove backpointers for all nodes the deleted node was pointing to.
-        let nbrs: Vec<u32> =
-          self.get_edges(int_id).iter().map(|x| x.0).collect();
-        for nbr in nbrs {
+        for nbr in get_edges_macro!(self, int_id).iter().map(|x| *x.to) {
           let nbr_backpointers =
             self.backpointers.get_mut(nbr as usize).unwrap();
 
@@ -1446,8 +1515,12 @@ pub fn exhaustive_knn_graph<
     }
     for edge_ix in 0..config.out_degree as usize {
       let SearchResult { item: id, dist, .. } = knn.pop().unwrap();
-      g.edges[(i as usize * config.out_degree as usize + edge_ix)] =
-        (id, dist, DEFAULT_LAMBDA);
+      let mut i_edges_mut = g.get_edges_mut(i);
+      let e = i_edges_mut.get_mut(edge_ix).unwrap();
+
+      *e.to = id;
+      *e.distance = dist;
+      *e.crowding_factor = DEFAULT_LAMBDA;
       let s = &mut g.backpointers[id as usize];
       s.insert(i);
     }
@@ -1512,6 +1585,12 @@ mod tests {
       result += diff * diff;
     }
     result
+  }
+
+  fn edge_slice_to_vec(e: EdgeSlice) -> Vec<(u32, f32, u8)> {
+    e.iter()
+      .map(|e| (*e.to, *e.distance, *e.crowding_factor))
+      .collect()
   }
 
   fn mk_config<'a, T>(
@@ -1598,9 +1677,18 @@ mod tests {
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
 
-    assert_eq!(g.get_edges(0), [(1, 1.0, 0), (2, 2.0, 0)].as_slice());
-    assert_eq!(g.get_edges(1), [(2, 1.0, 0), (0, 1.0, 0)].as_slice());
-    assert_eq!(g.get_edges(2), [(1, 1.0, 0), (0, 2.0, 0)].as_slice());
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(0)),
+      [(1, 1.0, 0), (2, 2.0, 0)].as_slice()
+    );
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(1)),
+      [(2, 1.0, 0), (0, 1.0, 0)].as_slice()
+    );
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(2)),
+      [(1, 1.0, 0), (0, 2.0, 0)].as_slice()
+    );
   }
 
   #[test]
@@ -1637,13 +1725,13 @@ mod tests {
     g.insert_vertex(1, vec![2], vec![1.0]);
     g.insert_vertex(2, vec![1], vec![1.0]);
 
-    assert_eq!(g.get_edges(0), [(2, 2.0, 0)].as_slice());
+    assert_eq!(edge_slice_to_vec(g.get_edges(0)), [(2, 2.0, 0)].as_slice());
 
     assert!(g.insert_edge_if_closer(0, 1, 1.0));
 
-    assert_eq!(g.get_edges(0), [(1, 1.0, 0)].as_slice());
-    assert_eq!(g.get_edges(1), [(2, 1.0, 0)].as_slice());
-    assert_eq!(g.get_edges(2), [(1, 1.0, 0)].as_slice());
+    assert_eq!(edge_slice_to_vec(g.get_edges(0)), [(1, 1.0, 0)].as_slice());
+    assert_eq!(edge_slice_to_vec(g.get_edges(1)), [(2, 1.0, 0)].as_slice());
+    assert_eq!(edge_slice_to_vec(g.get_edges(2)), [(1, 1.0, 0)].as_slice());
   }
 
   #[test]

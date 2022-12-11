@@ -231,6 +231,7 @@ dependencies = [
  "rand",
  "rand_core",
  "rand_xoshiro",
+ "soa_derive",
  "tinyset",
 ]
 
@@ -671,6 +672,26 @@ name = "smallvec"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2dd574626839106c320a323308629dcb1acfc96e32a8cba364ddc61ac23ee83"
+
+[[package]]
+name = "soa_derive"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "327b898354ca1a9e0386aa10b19f684d181ae273c0e8ce9ad22464e9fbe39322"
+dependencies = [
+ "soa_derive_internal",
+]
+
+[[package]]
+name = "soa_derive_internal"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bcbaa3dd35156733d6754fa463a6852a51652deb71490e4c2b67b8c8f5535a9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "syn"
