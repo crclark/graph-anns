@@ -110,15 +110,15 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_sq_euclidean_faster() {
+  fn test_sq_euclidean_iter() {
     let v1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let v2 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    assert_eq!(sq_euclidean_faster(&v1, &v2), 0.0);
+    assert_eq!(sq_euclidean_iter(&v1, &v2), 0.0);
     let v1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let v2 = [2, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    assert_eq!(sq_euclidean_faster(&v1, &v2), 1.0);
+    assert_eq!(sq_euclidean_iter(&v1, &v2), 1.0);
     let v1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let v2 = [2, 2, 3, 4, 5, 6, 7, 8, 9, 11];
-    assert_eq!(sq_euclidean_faster(&v1, &v2), 2.0);
+    assert_eq!(sq_euclidean_iter(&v1, &v2), 2.0);
   }
 }

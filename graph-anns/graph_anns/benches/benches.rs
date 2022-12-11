@@ -78,7 +78,7 @@ fn bench_insert_one(c: &mut Criterion) {
   let mut group = c.benchmark_group("insert_one");
   group.measurement_time(Duration::from_secs(60));
 
-  for n in [500, 1000, 10000].iter() {
+  for n in [500, 1000].iter() {
     group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
       let mk_g = || construct_graph(n, n + 1);
       b.iter_batched(
@@ -108,7 +108,7 @@ fn bench_construct_graph_approx_iterative(c: &mut Criterion) {
   group.measurement_time(Duration::from_secs(60));
   group.sampling_mode(SamplingMode::Flat);
 
-  for n in [500, 1000, 10000, 1000_000].iter() {
+  for n in [500].iter() {
     group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
       b.iter(|| construct_graph_approx_iterative(n))
     });
