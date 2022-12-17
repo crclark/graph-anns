@@ -309,3 +309,28 @@ Questions I want to answer with this prototype:
 For now, I will use an in-memory Data.Map instead of FDB.
 
 Because it doesn't build in the latest stackage, I moved the `fractals` Hackage package directly into the `src/` directory of this project. The package is BSD3 licensed, (c) 2015 Stephen Dekker.
+
+
+# memory issues
+
+commit 4279676 is array of structs, gets stuck at 274M at running time of 2 hours, page cache at 28.4, RES at 113.5
+
+commit c130430dd874432dcfff8597321491b6bf754be6 is struct of arrays, get stuck at 295M,  but ~38GB still in page cache, which seems odd. RES around 120G
+
+This is surprising because I was expecting enough of a decrease in total memory usage to be able to fit everything. The only thing that isn't accounted for is the hashmap from external to internal ids... could that be the issue?
+
+After further thinking, I am not fully convinced that the struct of arrays fix has saved the
+amount of memory I was expecting it to. Could we still have an alignment/padding problem when
+using that library?
+
+## More ideas to save memory
+
+### Move the ext-to-int mapping to rocksdb or delete it
+Do we really need the ext-to-int mapping? It does the following things. For "bottleneck when on-disk", let's assume NVMe disks, and 100 microseconds per lookup.
+
+| Thing  | critical path?  | bottleneck when in-memory?  | bottleneck when on-disk?  |  notes |
+|---|---|---|---|---|
+| Prevent duplicate inserts  | yes, insert  | no  | yes, capped at 10k inserts/sec  | needs to be looked up on each insert. Could give user an option to disable, this, though, or make the disabled version the default -- we are an in-memory structure, after all, but I don't want to make service architecture infeasible.  |
+| Enable deletion by external id  | no  | no  | no -- deletion is a big job  | deletion is already complex, this probably won't make it slower  |
+| Fast NN lookups by id  | no  | no  | no  | I guess it could be a bottleneck if you want to do a huge number of these, but that seems like an unlikely scenario  |
+
