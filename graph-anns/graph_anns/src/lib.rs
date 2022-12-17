@@ -1020,7 +1020,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
       let Reverse(sr) = r_min_heap.pop().unwrap();
       let f = { q_max_heap.peek().unwrap().clone() };
-      let sr_int = self.mapping.ext_to_int(&sr.item);
+      let sr_int = &sr.internal_id.unwrap();
       if sr.dist > f.dist {
         break;
       }
@@ -1290,10 +1290,10 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
 
                 let nearest_neighbor = nearest_neighbors
                   .iter()
-                  .map(|sr| (self.mapping.ext_to_int(&sr.item), sr.dist))
+                  .map(|sr| (sr.internal_id.unwrap(), sr.dist))
                   .filter(|(res_int_id, _dist)| {
-                    **res_int_id != int_id
-                      && **res_int_id != referrer
+                    *res_int_id != int_id
+                      && *res_int_id != referrer
                       && !referrer_nbrs.contains(&res_int_id)
                   })
                   .next();
@@ -1303,7 +1303,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                     "No replacement neighbors found -- is the graph too small?"
                   ),
                   Some((id, dist)) => {
-                    break (*id, dist);
+                    break (id, dist);
                   }
                 }
               }
