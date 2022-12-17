@@ -223,7 +223,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
 {
   fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
     let mut internal_to_external_ids = Vec::with_capacity(capacity as usize);
-    for _ in 0..capacity + 1 {
+    for _ in 0..capacity {
       internal_to_external_ids.push(None);
     }
     let external_to_internal_ids =
