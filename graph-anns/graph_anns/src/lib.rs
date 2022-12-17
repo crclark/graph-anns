@@ -211,12 +211,11 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
 /// user's distance callback is passed external ids (the user's IDs).
 #[derive(Debug)]
 pub struct InternalExternalIDMapping<T, S: BuildHasher> {
-  pub capacity: u32,
-  pub next_int_id: u32,
-  // TODO: using a vec might be faster.
-  pub internal_to_external_ids: Vec<Option<T>>,
-  pub external_to_internal_ids: HashMap<T, u32, S>,
-  pub deleted: Vec<u32>,
+  capacity: u32,
+  next_int_id: u32,
+  internal_to_external_ids: Vec<Option<T>>,
+  external_to_internal_ids: HashMap<T, u32, S>,
+  deleted: Vec<u32>,
 }
 
 impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
