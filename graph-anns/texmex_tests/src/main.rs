@@ -24,6 +24,7 @@ use std::sync::RwLock;
 use std::time::Instant;
 use std::{io, mem};
 use texmex::ID;
+use tinyset::SetU32;
 
 use std::io::prelude::*;
 
@@ -113,6 +114,22 @@ fn load_texmex_to_dense<'a>(
   dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
 ) -> KNN<'a, ID, RandomState> {
   let start_allocate_graph = Instant::now();
+  let out_degree = 7;
+  println!(
+    "struct of arrays, will be {}",
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<f32>() as usize
+      + out_degree as usize
+        * subset_size as usize
+        * mem::size_of::<u8>() as usize
+  );
+
+  println!(
+    "The internal_to_external_ids mapping should take {}",
+    subset_size as usize * mem::size_of::<Option<ID>>() as usize
+  );
 
   let build_hasher = RandomState::new();
 
@@ -223,7 +240,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
   num_correct as f32 / query_vecs.num_rows as f32
 }
 
-fn main_serial() {
+fn main() {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
@@ -232,7 +249,7 @@ fn main_serial() {
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
   let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_5M.ivecs_array");
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
@@ -241,6 +258,94 @@ fn main_serial() {
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
   println!("Recall@10: {}", recall);
+  pause();
+}
+
+/// Just allocate the core data structures directly, fill them with junk, and
+/// see what our RES is by pausing at the end. By process of elimination, we
+/// can figure out what is going on here.
+fn memory_usage_experiment(subset_size: usize, out_degree: usize) {
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+
+  let to = vec![0; subset_size * out_degree];
+
+  let distance = vec![0.0; subset_size * out_degree];
+
+  let crowding_factor = vec![0; subset_size * out_degree];
+
+  let mut edges = EdgeVec {
+    to,
+    distance,
+    crowding_factor,
+  };
+
+  for i in 0..subset_size * out_degree {
+    let edge = edges.get_mut(i).unwrap();
+    *edge.crowding_factor = 1;
+    *edge.to = prng.next_u32() % subset_size as u32;
+    *edge.distance = (prng.next_u32() % (subset_size as u32)) as f32;
+  }
+
+  let mut internal_to_external_ids = Vec::with_capacity(subset_size);
+  for _ in 0..subset_size {
+    internal_to_external_ids
+      .push(Some(ID::Base(prng.next_u32() % subset_size as u32)));
+  }
+
+  let mut backpointers = Vec::with_capacity(subset_size);
+
+  for i in 0..subset_size {
+    backpointers.push(SetU32::new());
+    // NOTE: nothing guarantees out_degree elements in backpointers. Could be
+    // larger or smaller. This is a simplifying assumption.
+    for _ in 0..out_degree {
+      backpointers[i].insert(prng.next_u32() % subset_size as u32);
+    }
+  }
+
+  //TODO: not sure if backpointers.mem_used already includes this. Try it both ways.
+  let mut backpointers_total_mem = subset_size * mem::size_of::<SetU32>();
+
+  for i in 0..subset_size {
+    backpointers_total_mem += backpointers[i].mem_used();
+  }
+
+  let struct_of_arrays_expected_size =
+    out_degree * subset_size * mem::size_of::<u32>()
+      + out_degree * subset_size * mem::size_of::<f32>()
+      + out_degree * subset_size * mem::size_of::<u8>();
+
+  let internal_to_external_ids_expected_size =
+    subset_size as usize * mem::size_of::<Option<ID>>() as usize;
+
+  println!(
+    "struct of arrays should be {}",
+    struct_of_arrays_expected_size
+  );
+
+  println!(
+    "The internal_to_external_ids mapping should take {}",
+    internal_to_external_ids_expected_size,
+  );
+
+  // NOTE: this is an extreme underestimation.
+  println!(
+    "backpointers expected size (SIGNIFICANTLY UNDERESTIMATED): {}",
+    backpointers_total_mem
+  );
+
+  println!(
+    "total expected size: {}",
+    struct_of_arrays_expected_size
+      + internal_to_external_ids_expected_size
+      + backpointers_total_mem
+  );
+
+  pause();
+}
+
+fn main_mem() {
+  memory_usage_experiment(5_000_000, 7);
 }
 
 // TODO: we need to parallelize insertion because it gets slower as more stuff
@@ -429,6 +534,11 @@ fn load_texmex_to_dense_par<'a>(
         * mem::size_of::<u8>() as usize
   );
 
+  println!(
+    "The internal_to_external_ids mapping should take {}",
+    subset_size as usize * mem::size_of::<Option<ID>>() as usize
+  );
+
   let config = KNNGraphConfig::new(
     subset_size as u32,
     out_degree,
@@ -472,7 +582,7 @@ fn load_texmex_to_dense_par<'a>(
   g
 }
 
-fn main() {
+fn main_parallel() {
   // NOTE: change gnd_path when you change this
   let subset_size: u32 = 1_000_000_000;
   let num_graphs: u32 = 32;

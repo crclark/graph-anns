@@ -334,3 +334,86 @@ Do we really need the ext-to-int mapping? It does the following things. For "bot
 | Enable deletion by external id  | no  | no  | no -- deletion is a big job  | deletion is already complex, this probably won't make it slower  |
 | Fast NN lookups by id  | no  | no  | no  | I guess it could be a bottleneck if you want to do a huge number of these, but that seems like an unlikely scenario  |
 
+#### Experiment: remove external_to_internal_ids entirely
+RESULT: saved 110MiB on the serial 5M benchmark, or roughly 10% of memory.
+
+... in the dumbest way possible. Just throw errors if ext_to_int is called. Our benchmark currently doesn't call delete, so this will just work.
+
+PROBLEM: some logic in exhaustive knn graph is highly dependent on returning the internal id early if an external id already exists in our mapping. I believe if we fix exhaustive_knn_graph, we can remove that early return and continue this test. I was able to fix it by doing the mapping inside exhaustive_knn_graph instead, which is a bit hacky.
+
+microbenches: slight perf regression on exhaustive_knn_graph (weird, but not important), no measurable diff on insertion (expected, only a couple hashmap ops). insert_one/1000 regressed, but I think it was noise or something. Makes no sense otherwise (or I created a perf bug while quickly commenting-out this code).
+
+The real test: can we get more than 300M nodes inserted before performance tanks?
+TODO: at 11.5M inserted (2 minutes into the run), insertions/sec hovering around 80 to 90k... is that worse than before? Check. Note that page cache was cold on this run; it is the first since rebooting.
+
+Performance tanks at ~380M inserted. RES=115G, 42G in page cache. Making progress, I guess... Total usage still doesn't add up to me. I am still expecting the core data structure to be 63GB. I am also not expecting memory usage to grow as we run anymore -- we use only structures with pre-sized capacities. This could be an artifact of Linux's memory system, however. Even with the serial test at 5M items, our VIRT jumps to 120G... why?
+
+Core data: 63GB *if* SoA is working correctly
+backpointers: 0.5GB if its output is to be believed
+internal_to_external_ids: 8GB
+total: ~71GB.
+Where does the rest of the memory go?
+Hypothesis: tinyset is buggy and using much more memory than expected. Try replacing with vec of vecs
+as a test?
+Other hypothesis: Vec is misbehaving even when I set its capacity?
+Maybe do some simple tests by creating artificial vecs and verifying memory usage?
+
+Serial results: 693s runtime, 1.5G resident. Our estimate was 315MiB for the core structure, 40MiB for the internal_to_external_ids, plus a true measurement of 500MiB for the backpointers. So that should be around 0.8GiB... we are off by almost exactly a factor of 2. Could this be an autoresizing vec doubling in size on us?
+
+Graph size: SpaceReport { mapping_int_ext_len: 5000001, mapping_int_ext_capacity: 10000000, mapping_ext_int_len: 0, mapping_ext_int_capacity: 0, mapping_deleted_len: 0, mapping_deleted_capacity: 0, edges_vec_len: 35000000, edges_vec_capacity: 35000000, backpointers_len: 5000000, backpointers_capacity: 5000000, backpointers_sets_sum_len: 35000000, backpointers_sets_sum_capacity: 118060167, backpointers_sets_mem_used: 495445704 }
+
+Look! The internal_to_external_ids had an off-by-one in the push loop and doubled in size. Did I add that because a test was failing? Fixing that doesn't change the usage, presumably because we only push one extra and linux is clever.
+
+Graph size: SpaceReport { mapping_int_ext_len: 5000000, mapping_int_ext_capacity: 5000000, mapping_ext_int_len: 0, mapping_ext_int_capacity: 0, mapping_deleted_len: 0, mapping_deleted_capacity: 0, edges_vec_len: 35000000, edges_vec_capacity: 35000000, backpointers_len: 5000000, backpointers_capacity: 5000000, backpointers_sets_sum_len: 35000000, backpointers_sets_sum_capacity: 118058769, backpointers_sets_mem_used: 495435836 }
+
+Wrote a little program to populate all the primary structures and estimate size and compare to RES.
+
+For 5M items and 7 out_degree:
+
+struct of arrays should be 315000000
+The internal_to_external_ids mapping should take 40000000
+backpointers expected size: 240625240
+total expected size: 595625240
+
+ie 600MiB. RES is actually 690MiB. Not too different. main_serial actually uses 1.5GiB.
+
+So there is some structure I haven't accounted for that is using significant memory. What could it be?
+
+In heap_gui, use bottom-up view to track allocations. We care about "leaked" memory -- memory that wasn't cleaned up when we hit ctrl-c. unleaked mem is temporary structures created during queries, etc.
+We can see exactly 315MiB coming from creating empty graph -- perfect
+18MiB from tinysets (ctrl-c early, expected)
+40MiB allocating backpointers vec
+40MiB allocating external_internal_id mapping
+
+so that adds up pretty well -- something else is happening as the program runs longer maybe. Let's try running the profiler longer.
+
+It's looking more and more like tinyset has a memory leak or is otherwise using more memory than expected. If I ctrl-c while doing a heap profile, its "leaked" memory usage is higher than what it returns from mem_used() by a significant amount.
+
+If we look at the flamegraph in heap_gui and switch to "memory peak" at the top, things get interesting. We see peak memory usage at 757MiB (150MiB more than what we calculated), and it is attributed to two things: creating an empty graph (expected) and inserting into backpointers when inserting new items. The empty graph is 395MiB -- 40MiB more than expected. We allocate a non-zeroed vector that is 40MiB in size and that is NOT the internal-to-external mapping. Oh, it's the backpointers. The backpointers is 362MiB -- 120MiB more than expected.
+
+Moral of the story: backpointers are taking up a lot more space than we estimated.
+
+While we are here, let's also determine how much space the external_to_internal_ids mapping is taking up, since that's why we were in this branch in the first place.
+
+### Remove backpointers
+
+Do we really need backpointers? They give us more neighbors when searching but otherwise don't seem to be used for anything. Double-check. The reason to be interested in backpointers is because they may be using more memory than expected, but I am still not sure.
+
+Also used during RRNP, but we could just use out-neighbors, right?
+
+Intuitively, the things pointing to me should be things I am pointing to or that my neighbors are pointing to, so hopefully the union of in and out neighbors is almost the same set as out neighbors alone, so discarding in-neighbors won't affect performance of RRNP or search much.
+
+### FP16 stored distances
+
+recompute distance on the fly if two distances are exactly equal or one or the other is fp16::max or fp16::min.
+
+### No stored distances
+Honestly don't know if we use them for anything important.
+
+### Try jemalloc
+
+Even heaptrack doesn't show all of the memory usage I am expecting to see based on RES. Could malloc overhead be the culprit? Let's try a different allocator.
+
+### Temporary data structures during search becoming large
+
+Yet another possibility is that temporary structures allocated during searches are large, and so our steady-state memory consumption while inserting looks higher than expected because we aren't accounting for those structures. On the other hand, when we pause after inserting everything, the RES number doesn't drop...
