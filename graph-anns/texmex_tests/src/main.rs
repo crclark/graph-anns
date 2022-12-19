@@ -18,6 +18,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::collections::hash_map::RandomState;
+use std::fs::File;
 use std::hash::BuildHasher;
 use std::path::Path;
 use std::sync::RwLock;
@@ -26,7 +27,7 @@ use std::{io, mem};
 use texmex::ID;
 use tinyset::SetU32;
 
-use std::io::prelude::*;
+use std::io::{prelude::*, LineWriter};
 
 mod texmex;
 
@@ -209,12 +210,37 @@ fn load_texmex_to_dense<'a>(
   g
 }
 
+fn write_search_stats(
+  search_stats: &Option<SearchStats>,
+  line_writer: &mut LineWriter<File>,
+) {
+  match search_stats {
+    Some(s) => {
+      write!(
+        line_writer,
+        "{},{},{},{},{},{},{},{},{}\n",
+        s.nearest_neighbor_distance,
+        s.num_distance_computations,
+        s.distance_from_nearest_starting_point,
+        s.distance_from_farthest_starting_point,
+        s.search_duration.as_micros(),
+        s.distance_calls_total_duration.as_micros(),
+        s.largest_distance_single_hop,
+        s.smallest_distance_single_hop,
+        s.nearest_neighbor_path_length
+      );
+    }
+    None => {}
+  }
+}
+
 fn recall_at_r<G: NN<ID>, R: RngCore>(
   g: &G,
   query_vecs: &texmex::Vecs<u8>,
   ground_truth: &texmex::Vecs<i32>,
   r: usize,
   prng: &mut R,
+  line_writer: &mut LineWriter<File>,
 ) -> f32 {
   let start_recall = Instant::now();
   let mut num_correct = 0;
@@ -222,6 +248,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
     let query = ID::Query(i as u32);
     let SearchResults {
       approximate_nearest_neighbors,
+      search_stats,
       ..
     } = g.query(&query, r, prng);
     // TODO: passing a PRNG into every query? Just store it in the graph.
@@ -234,6 +261,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
         num_correct += 1;
       }
     }
+    write_search_stats(&search_stats, line_writer);
   }
   println!("Finished recall@{} in {:?}", r, start_recall.elapsed());
 
@@ -256,7 +284,17 @@ fn main() {
   let g = load_texmex_to_dense(subset_size, &dist_fn);
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
+  let file = File::create("search_stats.csv").unwrap();
+  let mut line_writer = LineWriter::new(file);
+  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,distance_calls_total_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  let recall = recall_at_r(
+    &g,
+    &query_vecs,
+    &ground_truth,
+    10,
+    &mut prng,
+    &mut line_writer,
+  );
   println!("Recall@10: {}", recall);
   pause();
 }
@@ -598,7 +636,17 @@ fn main_parallel() {
   let g = load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn);
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let recall = recall_at_r(&g, &query_vecs, &ground_truth, 10, &mut prng);
+  let file = File::create("search_stats.csv").unwrap();
+  let mut line_writer = LineWriter::new(file);
+  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,distance_calls_total_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  let recall = recall_at_r(
+    &g,
+    &query_vecs,
+    &ground_truth,
+    10,
+    &mut prng,
+    &mut line_writer,
+  );
   println!("Recall@10: {}", recall);
   pause()
 }

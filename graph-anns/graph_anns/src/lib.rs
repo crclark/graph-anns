@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::hash::BuildHasher;
+use std::time::Duration;
+use std::time::Instant;
 use tinyset::SetU32;
 
 const DEFAULT_LAMBDA: u8 = 0;
@@ -200,6 +202,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
         .into_sorted_vec(),
       visited_nodes,
       visited_nodes_distances_to_q: HashMap::new(),
+      search_stats: None,
     }
   }
 }
@@ -666,7 +669,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     });
 
     for i in 0..tmp_edges_vec.len() {
-      let mut e = edges.get_mut(i).unwrap();
+      let e = edges.get_mut(i).unwrap();
       *e.to = tmp_edges_vec[i].to;
       *e.distance = tmp_edges_vec[i].distance;
       *e.crowding_factor = tmp_edges_vec[i].crowding_factor;
@@ -964,11 +967,35 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     ignore_occluded: bool,
   ) -> SearchResults<T> {
     assert!(self.config.num_searchers <= self.num_vertices);
+    let query_start = Instant::now();
+    let mut distance_calls_total_duration = Duration::from_millis(0);
+    let mut num_distance_computations = 0;
+    let mut compute_distance = |x, y| {
+      let dist_call_start = Instant::now();
+      let dist = (self.config.dist_fn)(x, y);
+      let dist_call_end = Instant::now();
+      let dist_duration = dist_call_end - dist_call_start;
+      distance_calls_total_duration += dist_duration;
+      num_distance_computations += 1;
+      return dist;
+    };
     let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
     let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
       BinaryHeap::new();
     let mut visited = HashSet::<u32>::new();
     let mut visited_distances: HashMap<u32, (T, f32)> = HashMap::default();
+    // TODO: all these new hash maps add significant perf overhead. Can they be
+    // replaced with new fields in SearchResult or something else that is just
+    // a field and not a hashmap?
+    // TODO: disable stat tracking on insertion, make it optional elsewhere.
+    // tracks the starting node of the search path for each node traversed.
+    let mut search_root_ancestor = HashMap::<u32, u32>::new();
+    // tracks the parent node of the search path for each node traversed.
+    let mut search_parent = HashMap::<u32, u32>::new();
+    // tracks the depth of the search path for each node traversed.
+    let mut search_depth = HashMap::<u32, u32>::new();
+    let mut largest_distance_single_hop = f32::NEG_INFINITY;
+    let mut smallest_distance_single_hop = f32::INFINITY;
 
     // Initialize our search with num_searchers initial points.
     // lines 2 to 10 of the pseudocode
@@ -977,11 +1004,22 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // TODO: create a test case that fails because of this before fixing it. It
     // will make a good regression test.
     assert!(self.starting_points_reservoir_sample.len() > 0);
+    let mut min_r_dist = f32::INFINITY;
+    let mut max_r_dist = f32::NEG_INFINITY;
     for StartPoint { id: r_int, .. } in &self.starting_points_reservoir_sample {
       let r_ext = self.mapping.int_to_ext(*r_int);
-      let r_dist = (self.config.dist_fn)(&q, &r_ext);
+      let r_dist = compute_distance(&q, &r_ext);
+      if r_dist < min_r_dist {
+        min_r_dist = r_dist;
+      }
+      if r_dist > max_r_dist {
+        max_r_dist = r_dist;
+      }
       visited.insert(*r_int);
       visited_distances.insert(*r_int, (r_ext.clone(), r_dist));
+      search_root_ancestor.insert(*r_int, *r_int);
+      search_parent.insert(*r_int, *r_int);
+      search_depth.insert(*r_int, 0);
       r_min_heap.push(Reverse(SearchResult::new(
         r_ext.clone(),
         Some(*r_int),
@@ -1039,8 +1077,18 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         let e_ext = self.mapping.int_to_ext(e);
         if !visited.contains(&e) {
           visited.insert(e);
-          let e_dist = (self.config.dist_fn)(&q, e_ext);
+          search_root_ancestor.insert(e, search_root_ancestor[&*sr_int]);
+          search_parent.insert(e, *sr_int);
+          search_depth.insert(e, search_depth[&*sr_int] + 1);
+          let e_dist = compute_distance(&q, e_ext);
           visited_distances.insert(e, (e_ext.clone(), e_dist));
+          let hop_distance = e_dist - sr.dist;
+          if hop_distance > largest_distance_single_hop {
+            largest_distance_single_hop = hop_distance;
+          }
+          if hop_distance < smallest_distance_single_hop {
+            smallest_distance_single_hop = hop_distance;
+          }
           if e_dist < f.dist || q_max_heap.len() < max_results {
             q_max_heap.push(SearchResult::new(e_ext.clone(), Some(e), e_dist));
             r_min_heap.push(Reverse(SearchResult::new(
@@ -1060,10 +1108,35 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       visited_vec.push(SearchResult::new(i_ext.clone(), Some(i_int), *i_dist));
     }
 
+    let nearest_neighbor = r_min_heap.peek().unwrap().0.clone();
+    let nearest_neighbor_distance = nearest_neighbor.dist;
+    let distance_from_nearest_starting_point =
+      nearest_neighbor_distance - min_r_dist;
+    let distance_from_farthest_starting_point =
+      nearest_neighbor_distance - max_r_dist;
+
+    let nearest_neighbor_path_length =
+      search_depth[&nearest_neighbor.internal_id.unwrap()] as usize;
+
+    // let nearest_neighbor_starting_point = search_root_ancestor[r_min_heap.peek().unwrap().0.internal_id.unwrap();]
+    // let distance_from_nearest_neighbor_to_its_starting_point =
+
     SearchResults {
       approximate_nearest_neighbors: q_max_heap.into_sorted_vec(),
       visited_nodes: visited_vec,
       visited_nodes_distances_to_q: visited_distances,
+      search_stats: Some(SearchStats {
+        num_distance_computations,
+        distance_from_nearest_starting_point,
+        distance_from_farthest_starting_point,
+        search_duration: Instant::now() - query_start,
+        distance_calls_total_duration,
+        largest_distance_single_hop,
+        smallest_distance_single_hop,
+        nearest_neighbor_path_length,
+        nearest_neighbor_distance,
+        // distance_from_nearest_neighbor_to_its_starting_point: todo!(),
+      }),
     }
   }
 
@@ -1196,6 +1269,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       approximate_nearest_neighbors: nearest_neighbors,
       visited_nodes,
       visited_nodes_distances_to_q,
+      search_stats: _,
     } = self.query_internal(&q, self.config.out_degree as usize, false);
 
     let (neighbors, dists) = nearest_neighbors
@@ -1420,6 +1494,71 @@ impl<T> Ord for SearchResult<T> {
   }
 }
 
+///
+#[derive(Debug, Clone, Copy)]
+pub struct SearchStats {
+  /// Distance between query point and nearest neighbor found
+  pub nearest_neighbor_distance: f32,
+  /// Number of times the user's distance function was called.
+  pub num_distance_computations: usize,
+  /// The distance from the starting search point that was nearest to the query
+  /// point to the nearest neighbor found.
+  pub distance_from_nearest_starting_point: f32,
+  /// The distance from the starting search point that was farthest from the query
+  /// point to the nearest neighbor found.
+  pub distance_from_farthest_starting_point: f32,
+  /// Total duration of the search call.
+  pub search_duration: Duration,
+  /// Sum total of the duration of all distance calls.
+  pub distance_calls_total_duration: Duration,
+  /// The largest distance moved towards the target point by a single hop from
+  /// one node to another node adjacent to it.
+  pub largest_distance_single_hop: f32,
+  /// The smallest distance moved towards the target point by a single hop from
+  /// one node to another node adjacent to it.
+  pub smallest_distance_single_hop: f32,
+  /// The total number of hops from the starting point to the nearest neighbor
+  /// that was found.
+  pub nearest_neighbor_path_length: usize,
+  // TODO
+  // /// The distance from the nearest neighbor to the starting point that the searcher that found it started from.
+  // pub distance_from_nearest_neighbor_to_its_starting_point: f32,
+}
+
+impl SearchStats {
+  fn merge(&self, other: &SearchStats) -> SearchStats {
+    SearchStats {
+      nearest_neighbor_distance: self
+        .nearest_neighbor_distance
+        .min(other.nearest_neighbor_distance),
+      num_distance_computations: self.num_distance_computations
+        + other.num_distance_computations,
+      distance_from_nearest_starting_point: self
+        .distance_from_nearest_starting_point
+        .min(other.distance_from_nearest_starting_point),
+      distance_from_farthest_starting_point: self
+        .distance_from_farthest_starting_point
+        .max(other.distance_from_farthest_starting_point),
+      search_duration: self.search_duration + other.search_duration,
+      distance_calls_total_duration: self.distance_calls_total_duration
+        + other.distance_calls_total_duration,
+      largest_distance_single_hop: self
+        .largest_distance_single_hop
+        .max(other.largest_distance_single_hop),
+      smallest_distance_single_hop: self
+        .smallest_distance_single_hop
+        .min(other.smallest_distance_single_hop),
+      nearest_neighbor_path_length: if self.nearest_neighbor_distance
+        < other.nearest_neighbor_distance
+      {
+        self.nearest_neighbor_path_length
+      } else {
+        other.nearest_neighbor_path_length
+      },
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchResults<T> {
   /// Results of the search, in order of increasing distance from the query.
@@ -1431,6 +1570,10 @@ pub struct SearchResults<T> {
   /// will be empty if the data structure is small (using the brute force
   /// algorithm), because the brute force algorithm doesn't assign internal ids.
   pub visited_nodes_distances_to_q: HashMap<u32, (T, f32)>,
+  /// Statistics about the execution of the search.
+  /// This will be None for small graphs, because the brute force algorithm
+  /// doesn't collect statistics.
+  pub search_stats: Option<SearchStats>,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
@@ -1458,6 +1601,12 @@ impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
     merged
       .visited_nodes_distances_to_q
       .extend(other.visited_nodes_distances_to_q.clone());
+    merged.search_stats = match (&self.search_stats, &other.search_stats) {
+      (Some(s1), Some(s2)) => Some(s1.merge(&s2)),
+      (Some(s1), None) => Some(*s1),
+      (None, Some(s2)) => Some(*s2),
+      (None, None) => None,
+    };
     merged
   }
 }
@@ -1468,6 +1617,7 @@ impl<T> Default for SearchResults<T> {
       approximate_nearest_neighbors: Vec::new(),
       visited_nodes: Vec::new(),
       visited_nodes_distances_to_q: HashMap::new(),
+      search_stats: None,
     }
   }
 }
@@ -2008,6 +2158,7 @@ mod tests {
         (2, (2, 2.0)),
         (3, (3, 3.0)),
       ]),
+      search_stats: None,
     };
     let sr2: SearchResults<u32> = SearchResults {
       approximate_nearest_neighbors: vec![
@@ -2044,6 +2195,7 @@ mod tests {
         (3, (3, 3.0)),
         (4, (4, 4.0)),
       ]),
+      search_stats: None,
     };
 
     let sr3 = sr1.merge(&sr2);
