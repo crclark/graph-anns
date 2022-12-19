@@ -337,7 +337,8 @@ Do we really need the ext-to-int mapping? It does the following things. For "bot
 #### Experiment: remove external_to_internal_ids entirely
 RESULT: saved 110MiB on the serial 5M benchmark, or roughly 10% of memory.
 
-... in the dumbest way possible. Just throw errors if ext_to_int is called. Our benchmark currently doesn't call delete, so this will just work.
+BRANCH: no-ext-int-mapping
+this branch was modified in the dumbest way possible. Just throw errors if ext_to_int is called. Our benchmark currently doesn't call delete, so this will just work.
 
 PROBLEM: some logic in exhaustive knn graph is highly dependent on returning the internal id early if an external id already exists in our mapping. I believe if we fix exhaustive_knn_graph, we can remove that early return and continue this test. I was able to fix it by doing the mapping inside exhaustive_knn_graph instead, which is a bit hacky.
 
@@ -402,6 +403,34 @@ Do we really need backpointers? They give us more neighbors when searching but o
 Also used during RRNP, but we could just use out-neighbors, right?
 
 Intuitively, the things pointing to me should be things I am pointing to or that my neighbors are pointing to, so hopefully the union of in and out neighbors is almost the same set as out neighbors alone, so discarding in-neighbors won't affect performance of RRNP or search much.
+
+Removing backpointers also gives us more room to add a higher out_degree. And higher out_degree has an advantage over backpointers when searching, because it's evenly distributed across all nodes, while backpointers can be winner-takes-all with a small number of nodes having a huge in-degree, which won't affect search performance as predictably.
+
+To be safe, I think we should implement our long-desired search statistics system before proceeding. I want stats on both the graph and the search.
+
+Search stats:
+
+- Number of distance computations.
+- Number of nodes visited.
+- Distance traveled from nearest starting point to nearest neighbor found.
+- distance moved towards nearest neighbor found on each hop.
+- Number of distance computations that discovered nodes that were in the wrong direction relative to the node that had already been expanded.
+- Search duration, wall clock time.
+- Sum of duration of all distance calls.
+
+^ want to output these into a csv so we can see how they change with changes that affect the actual search algorithm. Also want to understand which of the above actually explain search duration. I am particularly interested in how the structure of the graph affects it.
+
+
+
+Graph stats:
+- max distance between any two nodes (estimate, sample?)
+- average distance to nearest neighbor
+- average distance to farthest directly-connected neighbor
+- max distance to nearest neighbor (outlier)
+- min distance to nearest neighbor
+- max distance to farthest directly-connected neighbor
+- min distance to farthest directly-connected neighbor
+- Anything we can get on the distribution of nodes within the graph. Clustering algorithms? Fancy graph analysis metrics that I can no longer remember?
 
 ### FP16 stored distances
 
