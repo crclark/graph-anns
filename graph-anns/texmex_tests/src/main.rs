@@ -218,13 +218,12 @@ fn write_search_stats(
     Some(s) => {
       write!(
         line_writer,
-        "{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{}\n",
         s.nearest_neighbor_distance,
         s.num_distance_computations,
         s.distance_from_nearest_starting_point,
         s.distance_from_farthest_starting_point,
         s.search_duration.as_micros(),
-        s.distance_calls_total_duration.as_micros(),
         s.largest_distance_single_hop,
         s.smallest_distance_single_hop,
         s.nearest_neighbor_path_length
@@ -286,7 +285,7 @@ fn main() {
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let file = File::create("search_stats.csv").unwrap();
   let mut line_writer = LineWriter::new(file);
-  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,distance_calls_total_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
   let recall = recall_at_r(
     &g,
     &query_vecs,
@@ -638,7 +637,7 @@ fn main_parallel() {
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let file = File::create("search_stats.csv").unwrap();
   let mut line_writer = LineWriter::new(file);
-  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,distance_calls_total_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
   let recall = recall_at_r(
     &g,
     &query_vecs,
