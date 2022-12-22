@@ -190,7 +190,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
     let mut visited_nodes = Vec::new();
     for x in self.contents.iter() {
       let dist = (self.distance)(x, &q);
-      let search_result = SearchResult::new(*x, None, dist);
+      let search_result = SearchResult::new(*x, None, dist, 0, 0, 0);
       visited_nodes.push(search_result);
       nearest_neighbors_max_dist_heap.push(search_result);
       if nearest_neighbors_max_dist_heap.len() >= max_results {
@@ -867,6 +867,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             item: *w.to,
             internal_id: Some(*w.to),
             dist: *v.distance + *w.distance,
+            // TODO: these fields are nonsense in this context
+            // should they be Option?
+            search_root_ancestor: *w.to,
+            search_parent: *v.to,
+            search_depth: 2,
           }));
         }
       }
@@ -921,6 +926,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       item: _,
       internal_id,
       dist,
+      ..
     } in visited_nodes
     {
       w.push_back((internal_id.unwrap(), 0, dist));
@@ -968,14 +974,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   ) -> SearchResults<T> {
     assert!(self.config.num_searchers <= self.num_vertices);
     let query_start = Instant::now();
-    let mut distance_calls_total_duration = Duration::from_millis(0);
     let mut num_distance_computations = 0;
     let mut compute_distance = |x, y| {
-      let dist_call_start = Instant::now();
       let dist = (self.config.dist_fn)(x, y);
-      let dist_call_end = Instant::now();
-      let dist_duration = dist_call_end - dist_call_start;
-      distance_calls_total_duration += dist_duration;
       num_distance_computations += 1;
       return dist;
     };
@@ -989,11 +990,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // a field and not a hashmap?
     // TODO: disable stat tracking on insertion, make it optional elsewhere.
     // tracks the starting node of the search path for each node traversed.
-    let mut search_root_ancestor = HashMap::<u32, u32>::new();
-    // tracks the parent node of the search path for each node traversed.
-    let mut search_parent = HashMap::<u32, u32>::new();
-    // tracks the depth of the search path for each node traversed.
-    let mut search_depth = HashMap::<u32, u32>::new();
     let mut largest_distance_single_hop = f32::NEG_INFINITY;
     let mut smallest_distance_single_hop = f32::INFINITY;
 
@@ -1017,13 +1013,13 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       }
       visited.insert(*r_int);
       visited_distances.insert(*r_int, (r_ext.clone(), r_dist));
-      search_root_ancestor.insert(*r_int, *r_int);
-      search_parent.insert(*r_int, *r_int);
-      search_depth.insert(*r_int, 0);
       r_min_heap.push(Reverse(SearchResult::new(
         r_ext.clone(),
         Some(*r_int),
         r_dist,
+        *r_int,
+        *r_int,
+        0,
       )));
       match q_max_heap.peek() {
         None => {
@@ -1031,6 +1027,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             r_ext.clone(),
             Some(*r_int),
             r_dist,
+            *r_int,
+            *r_int,
+            0,
           ));
           // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
           // We are skipping it here since we did it above.
@@ -1041,6 +1040,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
               r_ext.clone(),
               Some(*r_int),
               r_dist,
+              *r_int,
+              *r_int,
+              0,
             ));
           }
         }
@@ -1077,9 +1079,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         let e_ext = self.mapping.int_to_ext(e);
         if !visited.contains(&e) {
           visited.insert(e);
-          search_root_ancestor.insert(e, search_root_ancestor[&*sr_int]);
-          search_parent.insert(e, *sr_int);
-          search_depth.insert(e, search_depth[&*sr_int] + 1);
           let e_dist = compute_distance(&q, e_ext);
           visited_distances.insert(e, (e_ext.clone(), e_dist));
           let hop_distance = e_dist - sr.dist;
@@ -1090,11 +1089,22 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             smallest_distance_single_hop = hop_distance;
           }
           if e_dist < f.dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(e_ext.clone(), Some(e), e_dist));
+            // TODO: use CoW to reduce duplicated objects
+            q_max_heap.push(SearchResult::new(
+              e_ext.clone(),
+              Some(e),
+              e_dist,
+              sr.search_root_ancestor,
+              *sr_int,
+              sr.search_depth + 1,
+            ));
             r_min_heap.push(Reverse(SearchResult::new(
               e_ext.clone(),
               Some(e),
               e_dist,
+              sr.search_root_ancestor,
+              *sr_int,
+              sr.search_depth + 1,
             )));
           }
         }
@@ -1105,7 +1115,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let mut visited_vec: Vec<SearchResult<T>> = Vec::new();
     for i_int in visited {
       let (i_ext, i_dist) = visited_distances.get(&i_int).unwrap();
-      visited_vec.push(SearchResult::new(i_ext.clone(), Some(i_int), *i_dist));
+      visited_vec.push(SearchResult::new(
+        i_ext.clone(),
+        Some(i_int),
+        *i_dist,
+        0,
+        0,
+        0,
+      ));
     }
 
     let nearest_neighbor = r_min_heap.peek().unwrap().0.clone();
@@ -1115,8 +1132,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let distance_from_farthest_starting_point =
       nearest_neighbor_distance - max_r_dist;
 
-    let nearest_neighbor_path_length =
-      search_depth[&nearest_neighbor.internal_id.unwrap()] as usize;
+    let nearest_neighbor_path_length = nearest_neighbor.search_depth as usize;
 
     // let nearest_neighbor_starting_point = search_root_ancestor[r_min_heap.peek().unwrap().0.internal_id.unwrap();]
     // let distance_from_nearest_neighbor_to_its_starting_point =
@@ -1130,7 +1146,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         distance_from_nearest_starting_point,
         distance_from_farthest_starting_point,
         search_duration: Instant::now() - query_start,
-        distance_calls_total_duration,
         largest_distance_single_hop,
         smallest_distance_single_hop,
         nearest_neighbor_path_length,
@@ -1283,6 +1298,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       item: _,
       internal_id: r_int,
       dist: r_dist,
+      ..
     } in &visited_nodes
     {
       let r_int = r_int.unwrap();
@@ -1462,14 +1478,28 @@ pub struct SearchResult<T> {
   pub internal_id: Option<u32>,
   /// The distance from the query point to this item.
   pub dist: f32,
+
+  search_root_ancestor: u32,
+  search_parent: u32,
+  search_depth: u32,
 }
 
 impl<T> SearchResult<T> {
-  pub fn new(item: T, internal_id: Option<u32>, dist: f32) -> SearchResult<T> {
+  pub fn new(
+    item: T,
+    internal_id: Option<u32>,
+    dist: f32,
+    search_root_ancestor: u32,
+    search_parent: u32,
+    search_depth: u32,
+  ) -> SearchResult<T> {
     Self {
       item,
       internal_id,
       dist,
+      search_root_ancestor,
+      search_parent,
+      search_depth,
     }
   }
 }
@@ -1510,9 +1540,6 @@ pub struct SearchStats {
   /// Total duration of the search call.
   pub search_duration: Duration,
   /// Sum total of the duration of all distance calls.
-  pub distance_calls_total_duration: Duration,
-  /// The largest distance moved towards the target point by a single hop from
-  /// one node to another node adjacent to it.
   pub largest_distance_single_hop: f32,
   /// The smallest distance moved towards the target point by a single hop from
   /// one node to another node adjacent to it.
@@ -1540,8 +1567,6 @@ impl SearchStats {
         .distance_from_farthest_starting_point
         .max(other.distance_from_farthest_starting_point),
       search_duration: self.search_duration + other.search_duration,
-      distance_calls_total_duration: self.distance_calls_total_duration
-        + other.distance_calls_total_duration,
       largest_distance_single_hop: self
         .largest_distance_single_hop
         .max(other.largest_distance_single_hop),
@@ -1656,7 +1681,7 @@ pub fn exhaustive_knn_graph<
       }
       let j = g.mapping.insert(*j_ext);
       let dist = (config.dist_fn)(i_ext, j_ext);
-      knn.push(SearchResult::new(j, Some(j), dist));
+      knn.push(SearchResult::new(j, Some(j), dist, 0, 0, 0));
 
       while knn.len() > config.out_degree as usize {
         knn.pop();
@@ -2129,11 +2154,17 @@ mod tests {
           item: 1,
           internal_id: Some(1),
           dist: 1.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 2,
           internal_id: Some(2),
           dist: 2.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
       ],
       visited_nodes: vec![
@@ -2141,16 +2172,25 @@ mod tests {
           item: 1,
           internal_id: Some(1),
           dist: 1.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 2,
           internal_id: Some(2),
           dist: 2.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 3,
           internal_id: Some(3),
           dist: 3.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
       ],
       visited_nodes_distances_to_q: HashMap::from([
@@ -2166,11 +2206,17 @@ mod tests {
           item: 3,
           internal_id: Some(3),
           dist: 3.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 4,
           internal_id: Some(4),
           dist: 4.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
       ],
       visited_nodes: vec![
@@ -2178,16 +2224,25 @@ mod tests {
           item: 1,
           internal_id: Some(1),
           dist: 1.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 3,
           internal_id: Some(3),
           dist: 3.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
         SearchResult {
           item: 4,
           internal_id: Some(4),
           dist: 4.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0,
         },
       ],
       visited_nodes_distances_to_q: HashMap::from([
@@ -2205,22 +2260,34 @@ mod tests {
         SearchResult {
           item: 1,
           internal_id: Some(1),
-          dist: 1.0
+          dist: 1.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 2,
           internal_id: Some(2),
-          dist: 2.0
+          dist: 2.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 3,
           internal_id: Some(3),
-          dist: 3.0
+          dist: 3.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 4,
           internal_id: Some(4),
-          dist: 4.0
+          dist: 4.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
       ]
     );
@@ -2231,21 +2298,33 @@ mod tests {
           item: 1,
           internal_id: Some(1),
           dist: 1.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 2,
           internal_id: Some(2),
           dist: 2.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 3,
           internal_id: Some(3),
           dist: 3.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
         SearchResult {
           item: 4,
           internal_id: Some(4),
           dist: 4.0,
+          search_root_ancestor: 0,
+          search_parent: 0,
+          search_depth: 0
         },
       ],
     );
