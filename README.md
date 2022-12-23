@@ -325,6 +325,12 @@ using that library?
 
 ## More ideas to save memory
 
+Main drivers of memory usage
+
+- adjacency list is almost 50% of memory
+- backpointers -- about equal to adjacency list in size
+- ext-to-int mapping is about 10% (on our benchmark problem -- obviously depends on the type of the external ids)
+
 ### Move the ext-to-int mapping to rocksdb or delete it
 Do we really need the ext-to-int mapping? It does the following things. For "bottleneck when on-disk", let's assume NVMe disks, and 100 microseconds per lookup.
 
@@ -398,7 +404,7 @@ While we are here, let's also determine how much space the external_to_internal_
 
 ### Remove backpointers
 
-Do we really need backpointers? They give us more neighbors when searching but otherwise don't seem to be used for anything. Double-check. The reason to be interested in backpointers is because they may be using more memory than expected, but I am still not sure.
+Do we really need backpointers? They give us more neighbors when searching but otherwise don't seem to be used for anything. Double-check. The reason to be interested in backpointers is because they account for roughly 50% of the data structure's memory usage.
 
 Also used during RRNP, but we could just use out-neighbors, right?
 
