@@ -1,6 +1,7 @@
 #![feature(is_sorted)]
 #![feature(portable_simd)]
 extern crate atomic_float;
+extern crate clap;
 extern crate graph_anns;
 extern crate indicatif;
 extern crate nix;
@@ -12,22 +13,22 @@ extern crate rand_xoshiro;
 extern crate rayon;
 extern crate tinyset;
 
+use clap::Parser;
 use graph_anns::*;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 use std::collections::hash_map::RandomState;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::hash::BuildHasher;
+use std::io::{prelude::*, LineWriter};
 use std::path::Path;
 use std::sync::RwLock;
 use std::time::Instant;
 use std::{io, mem};
 use texmex::ID;
 use tinyset::SetU32;
-
-use std::io::{prelude::*, LineWriter};
 
 mod texmex;
 
@@ -36,61 +37,12 @@ fn pause() {
   let mut stdout = io::stdout();
 
   // We want the cursor to stay at the end of the line, so we print without a newline and flush manually.
-  write!(stdout, "Press any key to continue...").unwrap();
+  write!(stdout, "Press enter to continue...").unwrap();
   stdout.flush().unwrap();
 
   // Read a single byte and discard
   let _ = stdin.read(&mut [0u8]).unwrap();
 }
-
-// fn main_alloc_1B() {
-//   println!(
-//     "let's see how much memory a 1-billion element HashMap<u32, u32> takes."
-//   );
-//   // Answer: about 9.5GiB with NoHashHasher, 18.5 with default hasher (not sure why it makes a difference)
-
-//   let n = 1000_000_000;
-//   let start = Instant::now();
-//   let mut h =
-//     HashMap::<u32, u32, BuildHasherDefault<NoHashHasher<u32>>>::with_capacity_and_hasher(n, BuildNoHashHasher::default());
-
-//   for i in 0..n {
-//     h.insert(i as u32, i as u32);
-//     if i % 1000000 == 0 {
-//       println!("inserted {}", i);
-//     }
-//   }
-
-//   let duration = start.elapsed();
-
-//   println!("Time elapsed: {:?}", duration);
-//   pause();
-// }
-
-// fn allocate_1_billion() {
-//   println!(
-//     "let's see how much memory a 1-billion element DenseKNNGraph takes."
-//   );
-
-//   // answer: 67.3G resident, took 211 seconds to allocate.
-
-//   fn dist(_x: &u32, _y: &u32) -> f32 {
-//     return 1.1f32;
-//   }
-
-//   let n = 1000_000_000;
-//   let start = Instant::now();
-//   let build_hasher: BuildHasherDefault<NoHashHasher<u32>> =
-//     nohash_hasher::BuildNoHashHasher::default();
-//   let config =
-//     KNNGraphConfig::new(n, 5, 5, &dist, build_hasher, false, 2, false);
-//   let _ = DenseKNNGraph::empty(config);
-
-//   let duration = start.elapsed();
-
-//   println!("Time elapsed: {:?}", duration);
-//   pause();
-// }
 
 fn make_dist_fn<'a>(
   base_vecs: texmex::Vecs<'a, u8>,
@@ -113,9 +65,10 @@ fn make_dist_fn<'a>(
 fn load_texmex_to_dense<'a>(
   subset_size: u32,
   dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+  args: Args,
 ) -> KNN<'a, ID, RandomState> {
   let start_allocate_graph = Instant::now();
-  let out_degree = 7;
+  let out_degree = args.out_degree;
   println!(
     "struct of arrays, will be {}",
     out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
@@ -174,13 +127,13 @@ fn load_texmex_to_dense<'a>(
   // slowdown at search time, which may not be too bad.
   let config = KNNGraphConfig::new(
     subset_size,
-    7,
-    7,
+    out_degree as u8,
+    args.num_searchers,
     dist_fn,
     build_hasher,
-    true,
-    2,
-    true,
+    args.rrnp,
+    args.rrnp_depth,
+    args.lgd,
   );
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
@@ -212,13 +165,17 @@ fn load_texmex_to_dense<'a>(
 
 fn write_search_stats(
   search_stats: &Option<SearchStats>,
+  found_closest: bool,
   line_writer: &mut LineWriter<File>,
+  args: Args,
 ) {
+  //parallelism,rrnp,lgd,rrnp_depth,out_degree,num_searchers
   match search_stats {
     Some(s) => {
       write!(
         line_writer,
-        "{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+        found_closest as u8,
         s.nearest_neighbor_distance,
         s.num_distance_computations,
         s.distance_from_nearest_starting_point,
@@ -226,7 +183,14 @@ fn write_search_stats(
         s.search_duration.as_micros(),
         s.largest_distance_single_hop,
         s.smallest_distance_single_hop,
-        s.nearest_neighbor_path_length
+        s.nearest_neighbor_path_length,
+        args.parallel,
+        args.rrnp,
+        args.lgd,
+        args.rrnp_depth,
+        args.out_degree,
+        args.num_searchers,
+        args.experiment_name,
       );
     }
     None => {}
@@ -240,6 +204,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
   r: usize,
   prng: &mut R,
   line_writer: &mut LineWriter<File>,
+  args: Args,
 ) -> f32 {
   let start_recall = Instant::now();
   let mut num_correct = 0;
@@ -250,6 +215,8 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
       search_stats,
       ..
     } = g.query(&query, r, prng);
+
+    let mut found_closest: bool = false;
     // TODO: passing a PRNG into every query? Just store it in the graph.
     for nbr in approximate_nearest_neighbors {
       let nbr_id = match nbr.item {
@@ -258,16 +225,33 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
       };
       if ground_truth[i as usize][0] == nbr_id as i32 {
         num_correct += 1;
+        found_closest = true;
       }
     }
-    write_search_stats(&search_stats, line_writer);
+    write_search_stats(&search_stats, found_closest, line_writer, args.clone());
   }
   println!("Finished recall@{} in {:?}", r, start_recall.elapsed());
 
   num_correct as f32 / query_vecs.num_rows as f32
 }
 
-fn main() {
+fn open_csv(args: Args) -> LineWriter<File> {
+  let fp = args.output_csv;
+  let existed = std::path::Path::new(&fp).exists();
+  let file = OpenOptions::new()
+    .write(true)
+    .create(true)
+    .append(true)
+    .open(fp)
+    .unwrap();
+  let mut line_writer = LineWriter::new(file);
+  if !existed {
+    line_writer.write_all(b"found_closest,nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length,parallelism,rrnp,lgd,rrnp_depth,out_degree,num_searchers,experiment_name\n").unwrap();
+  }
+  line_writer
+}
+
+fn main_single_threaded(args: Args) {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
@@ -280,12 +264,11 @@ fn main() {
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
-  let g = load_texmex_to_dense(subset_size, &dist_fn);
+  let g = load_texmex_to_dense(subset_size, &dist_fn, args.clone());
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let file = File::create("search_stats.csv").unwrap();
-  let mut line_writer = LineWriter::new(file);
-  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  let mut line_writer = open_csv(args.clone());
+
   let recall = recall_at_r(
     &g,
     &query_vecs,
@@ -293,6 +276,7 @@ fn main() {
     10,
     &mut prng,
     &mut line_writer,
+    args.clone(),
   );
   println!("Recall@10: {}", recall);
   pause();
@@ -501,12 +485,13 @@ fn load_texmex_to_dense_par<'a>(
   subset_size: u32,
   num_graphs: u32,
   dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+  args: Args,
 ) -> ManyKNN<'a, ID, RandomState> {
   let start_allocate_graph = Instant::now();
 
   let build_hasher = RandomState::new();
 
-  let out_degree = 7u8;
+  let out_degree = args.out_degree;
   println!(
     "Size of edges array will be {}",
     out_degree as usize
@@ -579,12 +564,12 @@ fn load_texmex_to_dense_par<'a>(
   let config = KNNGraphConfig::new(
     subset_size as u32,
     out_degree,
-    7,
+    args.num_searchers,
     dist_fn,
     build_hasher,
-    true,
-    2,
-    true,
+    args.rrnp,
+    args.rrnp_depth,
+    args.lgd,
   );
 
   let g = ManyKNN::new(num_graphs, config);
@@ -619,25 +604,24 @@ fn load_texmex_to_dense_par<'a>(
   g
 }
 
-fn main_parallel() {
+fn main_parallel(args: Args) {
   // NOTE: change gnd_path when you change this
-  let subset_size: u32 = 1_000_000_000;
-  let num_graphs: u32 = 32;
+  let subset_size: u32 = 5_000_000;
+  let num_graphs: u32 = args.parallel as u32;
   let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
   let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
   // NOTE: change this path depending on subset_size
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_1000M.ivecs_array");
+  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_5M.ivecs_array");
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
-  let g = load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn);
+  let g =
+    load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn, args.clone());
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let file = File::create("search_stats.csv").unwrap();
-  let mut line_writer = LineWriter::new(file);
-  line_writer.write_all(b"nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length\n");
+  let mut line_writer = open_csv(args.clone());
   let recall = recall_at_r(
     &g,
     &query_vecs,
@@ -645,9 +629,41 @@ fn main_parallel() {
     10,
     &mut prng,
     &mut line_writer,
+    args.clone(),
   );
   println!("Recall@10: {}", recall);
   pause()
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+  #[arg(long)]
+  parallel: u8,
+  #[arg(long)]
+  rrnp: bool,
+  #[arg(long)]
+  lgd: bool,
+  #[arg(long, default_value_t = 2)]
+  rrnp_depth: u32,
+  #[arg(long, default_value_t = 7)]
+  out_degree: u8,
+  #[arg(long, default_value_t = 7)]
+  num_searchers: u32,
+  #[arg(long, default_value = "search_stats.csv")]
+  output_csv: String,
+  #[arg(long, default_value = "default")]
+  experiment_name: String,
+}
+
+fn main() {
+  let mut args = Args::parse();
+
+  if args.parallel > 1 {
+    main_parallel(args);
+  } else {
+    main_single_threaded(args);
+  }
 }
 
 // TODO: parallel version appears to use more memory than single-threaded version
