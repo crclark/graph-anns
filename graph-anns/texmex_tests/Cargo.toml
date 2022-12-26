@@ -14,6 +14,17 @@ nohash-hasher = "0.2.0"
 rayon = "1.5.1" #TODO: remove?
 tinyset = "0.4.2"
 indicatif = {version = "*", features = ["rayon"]}
+clap = { version = "4.0.32", features = ["derive"] }
+
+# TODO: doesn't seem to work.
+# use
+# RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo run -p texmex_tests
+[profile.dev]
+debug = true
+target-cpu = "native"
+opt-level = 3
 
 [profile.release]
 debug = true
+target-cpu = "native"
+opt-level = 3
