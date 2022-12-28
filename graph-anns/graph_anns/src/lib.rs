@@ -8,6 +8,7 @@ use soa_derive::StructOfArray;
 
 use rand::thread_rng;
 use rand::RngCore;
+use std::cmp::max;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
@@ -336,7 +337,9 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
       KNN::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
           panic!("TODO create error type etc.");
-        } else if g.contents.len() == 20 {
+        } else if g.contents.len()
+          > max(config.out_degree as usize, config.num_searchers as usize)
+        {
           *self = KNN::Large(convert_bruteforce_to_dense(g, config.clone()));
           self.insert(x, prng);
         } else {
@@ -1124,8 +1127,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         0,
       ));
     }
-
-    let nearest_neighbor = r_min_heap.peek().unwrap().0.clone();
+    let approximate_nearest_neighbors = q_max_heap.into_sorted_vec();
+    let nearest_neighbor = approximate_nearest_neighbors.last().unwrap();
     let nearest_neighbor_distance = nearest_neighbor.dist;
     let distance_from_nearest_starting_point =
       nearest_neighbor_distance - min_r_dist;
@@ -1138,7 +1141,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // let distance_from_nearest_neighbor_to_its_starting_point =
 
     SearchResults {
-      approximate_nearest_neighbors: q_max_heap.into_sorted_vec(),
+      approximate_nearest_neighbors,
       visited_nodes: visited_vec,
       visited_nodes_distances_to_q: visited_distances,
       search_stats: Some(SearchStats {
