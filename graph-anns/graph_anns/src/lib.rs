@@ -1084,14 +1084,15 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
           visited.insert(e);
           let e_dist = compute_distance(&q, e_ext);
           visited_distances.insert(e, (e_ext.clone(), e_dist));
-          let hop_distance = e_dist - sr.dist;
-          if hop_distance > largest_distance_single_hop {
-            largest_distance_single_hop = hop_distance;
-          }
-          if hop_distance < smallest_distance_single_hop {
-            smallest_distance_single_hop = hop_distance;
-          }
+
           if e_dist < f.dist || q_max_heap.len() < max_results {
+            let hop_distance = e_dist - sr.dist;
+            if hop_distance > largest_distance_single_hop {
+              largest_distance_single_hop = hop_distance;
+            }
+            if hop_distance < smallest_distance_single_hop {
+              smallest_distance_single_hop = hop_distance;
+            }
             // TODO: use CoW to reduce duplicated objects
             q_max_heap.push(SearchResult::new(
               e_ext.clone(),
@@ -1130,10 +1131,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let approximate_nearest_neighbors = q_max_heap.into_sorted_vec();
     let nearest_neighbor = approximate_nearest_neighbors.last().unwrap();
     let nearest_neighbor_distance = nearest_neighbor.dist;
-    let distance_from_nearest_starting_point =
-      nearest_neighbor_distance - min_r_dist;
-    let distance_from_farthest_starting_point =
-      nearest_neighbor_distance - max_r_dist;
 
     let nearest_neighbor_path_length = nearest_neighbor.search_depth as usize;
 
@@ -1146,8 +1143,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       visited_nodes_distances_to_q: visited_distances,
       search_stats: Some(SearchStats {
         num_distance_computations,
-        distance_from_nearest_starting_point,
-        distance_from_farthest_starting_point,
+        distance_from_nearest_starting_point: min_r_dist,
+        distance_from_farthest_starting_point: max_r_dist,
         search_duration: Instant::now() - query_start,
         largest_distance_single_hop,
         smallest_distance_single_hop,
