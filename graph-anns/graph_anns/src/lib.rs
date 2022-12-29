@@ -430,6 +430,8 @@ pub struct SpaceReport {
   pub backpointers_capacity: usize,
   pub backpointers_sets_sum_len: usize,
   pub backpointers_sets_sum_capacity: usize,
+  pub backpointers_smallest_set_len: usize,
+  pub backpointers_largest_set_len: usize,
   backpointers_sets_mem_used: usize,
 }
 
@@ -456,6 +458,14 @@ impl SpaceReport {
         + other.backpointers_sets_sum_capacity,
       backpointers_sets_mem_used: self.backpointers_sets_mem_used
         + other.backpointers_sets_mem_used,
+      backpointers_smallest_set_len: std::cmp::min(
+        self.backpointers_smallest_set_len,
+        other.backpointers_smallest_set_len,
+      ),
+      backpointers_largest_set_len: std::cmp::max(
+        self.backpointers_largest_set_len,
+        other.backpointers_largest_set_len,
+      ),
     }
   }
 }
@@ -476,6 +486,8 @@ impl Default for SpaceReport {
       backpointers_sets_sum_len: 0,
       backpointers_sets_sum_capacity: 0,
       backpointers_sets_mem_used: 0,
+      backpointers_smallest_set_len: usize::MAX,
+      backpointers_largest_set_len: 0,
     }
   }
 }
@@ -569,6 +581,18 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         .iter()
         .map(|s| s.mem_used())
         .sum(),
+      backpointers_smallest_set_len: self
+        .backpointers
+        .iter()
+        .map(|s| s.len())
+        .min()
+        .unwrap_or(0),
+      backpointers_largest_set_len: self
+        .backpointers
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(0),
     }
   }
 
