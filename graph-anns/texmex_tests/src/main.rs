@@ -28,7 +28,6 @@ use std::sync::RwLock;
 use std::time::Instant;
 use std::{io, mem};
 use texmex::ID;
-use tinyset::SetU32;
 
 mod texmex;
 
@@ -48,7 +47,7 @@ fn make_dist_fn<'a>(
   base_vecs: texmex::Vecs<'a, u8>,
   query_vecs: texmex::Vecs<'a, u8>,
 ) -> impl Fn(&ID, &ID) -> f32 + 'a + Clone + Sync + Send {
-  let dist_fn = Box::new(move |x: &ID, y: &ID| -> f32 {
+  Box::new(move |x: &ID, y: &ID| -> f32 {
     let x_slice = match x {
       ID::Base(i) => &base_vecs[*i as usize],
       ID::Query(i) => &query_vecs[*i as usize],
@@ -57,32 +56,27 @@ fn make_dist_fn<'a>(
       ID::Base(i) => &base_vecs[*i as usize],
       ID::Query(i) => &query_vecs[*i as usize],
     };
-    return texmex::sq_euclidean_iter(x_slice, y_slice);
-  });
-  dist_fn
+    texmex::sq_euclidean_iter(x_slice, y_slice)
+  })
 }
 
-fn load_texmex_to_dense<'a>(
+fn load_texmex_to_dense(
   subset_size: u32,
-  dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+  dist_fn: &(dyn Fn(&ID, &ID) -> f32 + Sync),
   args: Args,
-) -> KNN<'a, ID, RandomState> {
+) -> KNN<ID, RandomState> {
   let start_allocate_graph = Instant::now();
   let out_degree = args.out_degree;
   println!(
     "struct of arrays, will be {}",
-    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<f32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<f32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "The internal_to_external_ids mapping should take {}",
-    subset_size as usize * mem::size_of::<Option<ID>>() as usize
+    subset_size as usize * mem::size_of::<Option<ID>>()
   );
 
   let build_hasher = RandomState::new();
@@ -125,16 +119,16 @@ fn load_texmex_to_dense<'a>(
   // to reach 1B points. The tradeoff to faster insertion may be slower search (or at least
   // multithreaded search). Hmm. I think the benefit to insertion will far outweigh the
   // slowdown at search time, which may not be too bad.
-  let config = KNNGraphConfig::new(
-    subset_size,
-    out_degree as u8,
-    args.num_searchers,
+  let config = KNNGraphConfig {
+    capacity: subset_size,
+    out_degree,
+    num_searchers: args.num_searchers,
     dist_fn,
     build_hasher,
-    args.rrnp,
-    args.rrnp_depth,
-    args.lgd,
-  );
+    use_rrnp: args.rrnp,
+    rrnp_max_depth: args.rrnp_depth,
+    use_lgd: args.lgd,
+  };
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let mut g = KNN::new(config);
@@ -153,7 +147,7 @@ fn load_texmex_to_dense<'a>(
       println!("inserting {}", i);
       println!("elapsed: {:?}", start_inserting.elapsed());
     }
-    g.insert(ID::Base(i as u32), &mut prng);
+    g.insert(ID::Base(i), &mut prng);
   }
   println!(
     "Finished building the nearest neighbors graph in {:?}",
@@ -171,9 +165,9 @@ fn write_search_stats(
 ) {
   match search_stats {
     Some(s) => {
-      write!(
+      writeln!(
         line_writer,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         found_closest as u8,
         s.nearest_neighbor_distance,
         s.num_distance_computations,
@@ -224,7 +218,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
         ID::Base(i) => i,
         ID::Query(i) => i,
       };
-      if ground_truth[i as usize][0] == nbr_id as i32 {
+      if ground_truth[i][0] == nbr_id as i32 {
         num_correct += 1;
         found_closest = true;
       }
@@ -277,98 +271,98 @@ fn main_single_threaded(args: Args) {
     10,
     &mut prng,
     &mut line_writer,
-    args.clone(),
+    args,
   );
   println!("Recall@10: {}", recall);
   pause();
 }
 
-/// Just allocate the core data structures directly, fill them with junk, and
-/// see what our RES is by pausing at the end. By process of elimination, we
-/// can figure out what is going on here.
-fn memory_usage_experiment(subset_size: usize, out_degree: usize) {
-  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+// /// Just allocate the core data structures directly, fill them with junk, and
+// /// see what our RES is by pausing at the end. By process of elimination, we
+// /// can figure out what is going on here.
+// fn memory_usage_experiment(subset_size: usize, out_degree: usize) {
+//   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 
-  let to = vec![0; subset_size * out_degree];
+//   let to = vec![0; subset_size * out_degree];
 
-  let distance = vec![0.0; subset_size * out_degree];
+//   let distance = vec![0.0; subset_size * out_degree];
 
-  let crowding_factor = vec![0; subset_size * out_degree];
+//   let crowding_factor = vec![0; subset_size * out_degree];
 
-  let mut edges = EdgeVec {
-    to,
-    distance,
-    crowding_factor,
-  };
+//   let mut edges = EdgeVec {
+//     to,
+//     distance,
+//     crowding_factor,
+//   };
 
-  for i in 0..subset_size * out_degree {
-    let edge = edges.get_mut(i).unwrap();
-    *edge.crowding_factor = 1;
-    *edge.to = prng.next_u32() % subset_size as u32;
-    *edge.distance = (prng.next_u32() % (subset_size as u32)) as f32;
-  }
+//   for i in 0..subset_size * out_degree {
+//     let edge = edges.get_mut(i).unwrap();
+//     *edge.crowding_factor = 1;
+//     *edge.to = prng.next_u32() % subset_size as u32;
+//     *edge.distance = (prng.next_u32() % (subset_size as u32)) as f32;
+//   }
 
-  let mut internal_to_external_ids = Vec::with_capacity(subset_size);
-  for _ in 0..subset_size {
-    internal_to_external_ids
-      .push(Some(ID::Base(prng.next_u32() % subset_size as u32)));
-  }
+//   let mut internal_to_external_ids = Vec::with_capacity(subset_size);
+//   for _ in 0..subset_size {
+//     internal_to_external_ids
+//       .push(Some(ID::Base(prng.next_u32() % subset_size as u32)));
+//   }
 
-  let mut backpointers = Vec::with_capacity(subset_size);
+//   let mut backpointers = Vec::with_capacity(subset_size);
 
-  for i in 0..subset_size {
-    backpointers.push(SetU32::new());
-    // NOTE: nothing guarantees out_degree elements in backpointers. Could be
-    // larger or smaller. This is a simplifying assumption.
-    for _ in 0..out_degree {
-      backpointers[i].insert(prng.next_u32() % subset_size as u32);
-    }
-  }
+//   for i in 0..subset_size {
+//     backpointers.push(SetU32::new());
+//     // NOTE: nothing guarantees out_degree elements in backpointers. Could be
+//     // larger or smaller. This is a simplifying assumption.
+//     for _ in 0..out_degree {
+//       backpointers[i].insert(prng.next_u32() % subset_size as u32);
+//     }
+//   }
 
-  //TODO: not sure if backpointers.mem_used already includes this. Try it both ways.
-  let mut backpointers_total_mem = subset_size * mem::size_of::<SetU32>();
+//   //TODO: not sure if backpointers.mem_used already includes this. Try it both ways.
+//   let mut backpointers_total_mem = subset_size * mem::size_of::<SetU32>();
 
-  for i in 0..subset_size {
-    backpointers_total_mem += backpointers[i].mem_used();
-  }
+//   for i in 0..subset_size {
+//     backpointers_total_mem += backpointers[i].mem_used();
+//   }
 
-  let struct_of_arrays_expected_size =
-    out_degree * subset_size * mem::size_of::<u32>()
-      + out_degree * subset_size * mem::size_of::<f32>()
-      + out_degree * subset_size * mem::size_of::<u8>();
+//   let struct_of_arrays_expected_size =
+//     out_degree * subset_size * mem::size_of::<u32>()
+//       + out_degree * subset_size * mem::size_of::<f32>()
+//       + out_degree * subset_size * mem::size_of::<u8>();
 
-  let internal_to_external_ids_expected_size =
-    subset_size as usize * mem::size_of::<Option<ID>>() as usize;
+//   let internal_to_external_ids_expected_size =
+//     subset_size as usize * mem::size_of::<Option<ID>>() as usize;
 
-  println!(
-    "struct of arrays should be {}",
-    struct_of_arrays_expected_size
-  );
+//   println!(
+//     "struct of arrays should be {}",
+//     struct_of_arrays_expected_size
+//   );
 
-  println!(
-    "The internal_to_external_ids mapping should take {}",
-    internal_to_external_ids_expected_size,
-  );
+//   println!(
+//     "The internal_to_external_ids mapping should take {}",
+//     internal_to_external_ids_expected_size,
+//   );
 
-  // NOTE: this is an extreme underestimation.
-  println!(
-    "backpointers expected size (SIGNIFICANTLY UNDERESTIMATED): {}",
-    backpointers_total_mem
-  );
+//   // NOTE: this is an extreme underestimation.
+//   println!(
+//     "backpointers expected size (SIGNIFICANTLY UNDERESTIMATED): {}",
+//     backpointers_total_mem
+//   );
 
-  println!(
-    "total expected size: {}",
-    struct_of_arrays_expected_size
-      + internal_to_external_ids_expected_size
-      + backpointers_total_mem
-  );
+//   println!(
+//     "total expected size: {}",
+//     struct_of_arrays_expected_size
+//       + internal_to_external_ids_expected_size
+//       + backpointers_total_mem
+//   );
 
-  pause();
-}
+//   pause();
+// }
 
-fn main_mem() {
-  memory_usage_experiment(5_000_000, 7);
-}
+// fn main_mem() {
+//   memory_usage_experiment(5_000_000, 7);
+// }
 
 // TODO: we need to parallelize insertion because it gets slower as more stuff
 // is inserted. Let's start by implementing parallelization here, then move
@@ -414,7 +408,7 @@ impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
 {
   pub fn new(n: u32, config: KNNGraphConfig<ID, S>) -> ManyKNN<ID, S> {
     let total_capacity = config.capacity;
-    let individual_capacity = total_capacity / n + total_capacity % n as u32;
+    let individual_capacity = total_capacity / n + total_capacity % n;
     let mut graphs = Vec::with_capacity(n as usize);
     for _ in 0..n {
       let mut config = config.clone();
@@ -440,13 +434,13 @@ impl<
     S: BuildHasher + Clone + Send + Sync,
   > NN<T> for ManyKNN<'a, T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
     let i = prng.next_u32() % self.graphs.len() as u32;
     let mut g = self.graphs[i as usize].write().unwrap();
     g.insert(x, prng);
   }
 
-  fn delete(&mut self, x: T) -> () {
+  fn delete(&mut self, x: T) {
     for g in &self.graphs {
       let mut g = g.write().unwrap();
       g.delete(x);
@@ -468,7 +462,7 @@ impl<
           &mut rand::thread_rng(),
         )
       })
-      .reduce(|| SearchResults::<T>::default(), |acc, e| acc.merge(&e));
+      .reduce(SearchResults::<T>::default, |acc, e| acc.merge(&e));
 
     results.approximate_nearest_neighbors.truncate(max_results);
     results
@@ -482,12 +476,12 @@ struct Test {
   d: u8,
 }
 
-fn load_texmex_to_dense_par<'a>(
+fn load_texmex_to_dense_par(
   subset_size: u32,
   num_graphs: u32,
-  dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+  dist_fn: &(dyn Fn(&ID, &ID) -> f32 + Sync),
   args: Args,
-) -> ManyKNN<'a, ID, RandomState> {
+) -> ManyKNN<ID, RandomState> {
   let start_allocate_graph = Instant::now();
 
   let build_hasher = RandomState::new();
@@ -497,81 +491,61 @@ fn load_texmex_to_dense_par<'a>(
     "Size of edges array will be {}",
     out_degree as usize
       * subset_size as usize
-      * mem::size_of::<(u32, f32, u8)>() as usize
+      * mem::size_of::<(u32, f32, u8)>()
   );
 
   println!(
     "If we used a custom struct with packed, it would be {}",
-    out_degree as usize
-      * subset_size as usize
-      * mem::size_of::<Test>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<Test>()
   );
 
   println!(
     "If we switched to Vec<(u32, f32)>, Vec<u8>, it would be {}",
-    out_degree as usize
-      * subset_size as usize
-      * mem::size_of::<(u32, f32)>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<(u32, f32)>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "If we switched to Vec<(u32, f16)>, Vec<u8>, it would be {}",
-    out_degree as usize
-      * subset_size as usize
-      * mem::size_of::<(u32, u16)>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<(u32, u16)>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "If we switched to struct of arrays, it would be {}",
-    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<f32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<f32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "If we switched to f16 stored distances, it would be {}",
-    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u16>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u16>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "If we always recomputed distances and didn't store them, it would be {}",
-    out_degree as usize * subset_size as usize * mem::size_of::<u32>() as usize
-      + out_degree as usize
-        * subset_size as usize
-        * mem::size_of::<u8>() as usize
+    out_degree as usize * subset_size as usize * mem::size_of::<u32>()
+      + out_degree as usize * subset_size as usize * mem::size_of::<u8>()
   );
 
   println!(
     "The internal_to_external_ids mapping should take {}",
-    subset_size as usize * mem::size_of::<Option<ID>>() as usize
+    subset_size as usize * mem::size_of::<Option<ID>>()
   );
 
-  let config = KNNGraphConfig::new(
-    subset_size as u32,
+  let config = KNNGraphConfig {
+    capacity: subset_size,
     out_degree,
-    args.num_searchers,
+    num_searchers: args.num_searchers,
     dist_fn,
     build_hasher,
-    args.rrnp,
-    args.rrnp_depth,
-    args.lgd,
-  );
+    use_rrnp: args.rrnp,
+    rrnp_max_depth: args.rrnp_depth,
+    use_lgd: args.lgd,
+  };
 
   let g = ManyKNN::new(num_graphs, config);
 
@@ -594,7 +568,7 @@ fn load_texmex_to_dense_par<'a>(
     .progress_with_style(style)
     .for_each(|i| {
       let mut g = g.graphs[i as usize % g.graphs.len()].write().unwrap();
-      g.insert(ID::Base(i as u32), &mut rand::thread_rng());
+      g.insert(ID::Base(i), &mut rand::thread_rng());
     });
   println!(
     "Finished building the nearest neighbors graph in {:?}",
@@ -630,7 +604,7 @@ fn main_parallel(args: Args) {
     10,
     &mut prng,
     &mut line_writer,
-    args.clone(),
+    args,
   );
   println!("Recall@10: {}", recall);
   pause()
@@ -658,7 +632,7 @@ struct Args {
 }
 
 fn main() {
-  let mut args = Args::parse();
+  let args = Args::parse();
 
   if args.parallel > 1 {
     main_parallel(args);

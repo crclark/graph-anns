@@ -17,7 +17,7 @@ pub struct Vecs<'a, T> {
   buffer: &'a [T],
 }
 
-impl<'a, T> Vecs<'_, T> {
+impl<T> Vecs<'_, T> {
   pub fn new<P>(path: P, num_dim: usize) -> Result<Self, String>
   where
     P: AsRef<std::path::Path>,
