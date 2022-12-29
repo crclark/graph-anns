@@ -433,6 +433,7 @@ pub struct SpaceReport {
   pub backpointers_smallest_set_len: usize,
   pub backpointers_largest_set_len: usize,
   backpointers_sets_mem_used: usize,
+  pub num_reciprocated_edges: usize,
 }
 
 impl SpaceReport {
@@ -466,6 +467,8 @@ impl SpaceReport {
         self.backpointers_largest_set_len,
         other.backpointers_largest_set_len,
       ),
+      num_reciprocated_edges: self.num_reciprocated_edges
+        + other.num_reciprocated_edges,
     }
   }
 }
@@ -488,6 +491,7 @@ impl Default for SpaceReport {
       backpointers_sets_mem_used: 0,
       backpointers_smallest_set_len: usize::MAX,
       backpointers_largest_set_len: 0,
+      num_reciprocated_edges: 0,
     }
   }
 }
@@ -546,6 +550,24 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
 impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   DenseKNNGraph<'a, T, S>
 {
+  fn has_edge(&self, from: u32, to: u32) -> bool {
+    self.get_edges(from).iter().any(|e| *e.to == to)
+  }
+
+  fn count_reciprocated_edges(&self) -> usize {
+    let mut count = 0;
+    for (i, v) in self.mapping.internal_to_external_ids.iter().enumerate() {
+      if v.is_some() {
+        for e in self.get_edges(i as u32) {
+          if self.has_edge(*e.to, i as u32) {
+            count += 1;
+          }
+        }
+      }
+    }
+    count
+  }
+
   /// Returns information about the length and capacity of all data structures
   /// in the graph.
   pub fn debug_size_stats(&self) -> SpaceReport {
@@ -593,6 +615,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         .map(|s| s.len())
         .max()
         .unwrap_or(0),
+      num_reciprocated_edges: self.count_reciprocated_edges(),
     }
   }
 
