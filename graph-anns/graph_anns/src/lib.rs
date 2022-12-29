@@ -105,31 +105,6 @@ pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
 // NOTE: can't do a Default because we can't guess a reasonable capacity.
 // TODO: auto-resize like a Vec?
 
-impl<'a, T, S: BuildHasher + Clone> KNNGraphConfig<'a, T, S> {
-  /// Create a new KNNGraphConfig.
-  pub fn new(
-    capacity: u32,
-    out_degree: u8,
-    num_searchers: u32,
-    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-    build_hasher: S,
-    use_rrnp: bool,
-    rrnp_max_depth: u32,
-    use_lgd: bool,
-  ) -> KNNGraphConfig<'a, T, S> {
-    KNNGraphConfig::<'a, T, S> {
-      capacity,
-      out_degree,
-      num_searchers,
-      dist_fn,
-      build_hasher,
-      use_rrnp,
-      rrnp_max_depth,
-      use_lgd,
-    }
-  }
-}
-
 // TODO: test that query can find already-inserted items
 
 pub trait NN<T> {
@@ -138,8 +113,8 @@ pub trait NN<T> {
 
   // TODO: more functions in this interface.
 
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> ();
-  fn delete(&mut self, x: T) -> ();
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R);
+  fn delete(&mut self, x: T);
   fn query<R: RngCore>(
     &self,
     q: &T,
@@ -172,11 +147,11 @@ impl<'a, T> BruteForceKNN<'a, T> {
 }
 
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
-  fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) -> () {
+  fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) {
     self.contents.insert(x);
   }
 
-  fn delete(&mut self, x: T) -> () {
+  fn delete(&mut self, x: T) {
     self.contents.remove(&x);
   }
 
@@ -190,8 +165,8 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
       BinaryHeap::new();
     let mut visited_nodes = Vec::new();
     for x in self.contents.iter() {
-      let dist = (self.distance)(x, &q);
-      let search_result = SearchResult::new(*x, None, dist, 0, 0, 0);
+      let dist = (self.distance)(x, q);
+      let search_result = SearchResult::new(*x, None, dist, 0, 0);
       visited_nodes.push(search_result);
       nearest_neighbors_max_dist_heap.push(search_result);
       if nearest_neighbors_max_dist_heap.len() >= max_results {
@@ -243,11 +218,9 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
     }
   }
 
-  fn insert(self: &mut Self, x: &T) -> u32 {
-    match self.external_to_internal_ids.get(&x) {
-      Some(id) => {
-        return (*id).clone();
-      }
+  fn insert(&mut self, x: &T) -> u32 {
+    match self.external_to_internal_ids.get(x) {
+      Some(id) => *id,
       None => {
         let x_int = match self.deleted.pop() {
           None => self.next_int_id,
@@ -262,12 +235,12 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
         // map or something to reduce memory usage.
         self.internal_to_external_ids[x_int as usize] = Some(x.clone());
         self.external_to_internal_ids.insert(x.clone(), x_int);
-        return x_int;
+        x_int
       }
     }
   }
 
-  fn int_to_ext(self: &Self, x: u32) -> &T {
+  fn int_to_ext(&self, x: u32) -> &T {
     match self.internal_to_external_ids.get(x as usize) {
       None => panic!("internal error: unknown internal id: {}", x),
       Some(None) => panic!("internal error: unknown external id: {}", x),
@@ -275,19 +248,19 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
     }
   }
 
-  fn ext_to_int(self: &Self, x: &T) -> &u32 {
+  fn ext_to_int(&self, x: &T) -> &u32 {
     match self.external_to_internal_ids.get(x) {
       None => panic!("external error: unknown external id"),
       Some(i) => i,
     }
   }
 
-  fn delete(self: &mut Self, x: &T) -> u32 {
-    let x_int = (*self.ext_to_int(x)).clone();
+  fn delete(&mut self, x: &T) -> u32 {
+    let x_int = *self.ext_to_int(x);
     self.deleted.push(x_int);
     self.internal_to_external_ids[x_int as usize] = None;
-    self.external_to_internal_ids.remove(&x);
-    return x_int;
+    self.external_to_internal_ids.remove(x);
+    x_int
   }
 }
 
@@ -332,7 +305,7 @@ pub enum KNN<'a, T, S: BuildHasher + Clone> {
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   for KNN<'a, T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> () {
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
     match self {
       KNN::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
@@ -350,7 +323,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     }
   }
 
-  fn delete(&mut self, x: T) -> () {
+  fn delete(&mut self, x: T) {
     match self {
       KNN::Small { g, .. } => {
         g.delete(x);
@@ -362,10 +335,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           let config = g.config.clone();
           let mut small_g = convert_dense_to_bruteforce(g);
           small_g.delete(x);
-          *self = KNN::Small {
-            g: small_g,
-            config: config,
-          };
+          *self = KNN::Small { g: small_g, config };
         }
       }
     }
@@ -378,8 +348,8 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     prng: &mut R,
   ) -> SearchResults<T> {
     match self {
-      KNN::Small { g, .. } => g.query(&q, max_results, prng),
-      KNN::Large(g) => g.query(&q, max_results, prng),
+      KNN::Small { g, .. } => g.query(q, max_results, prng),
+      KNN::Large(g) => g.query(q, max_results, prng),
     }
   }
 }
@@ -395,11 +365,9 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 
   /// Panics if graph structure is internally inconsistent. Used for testing.
-  pub fn debug_consistency_check(&self) -> () {
+  pub fn debug_consistency_check(&self) {
     match self {
-      KNN::Small { .. } => {
-        return;
-      }
+      KNN::Small { .. } => {}
       KNN::Large(g) => {
         g.consistency_check();
       }
@@ -718,11 +686,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       a.distance.total_cmp(&b_dist)
     });
 
-    for i in 0..tmp_edges_vec.len() {
+    for (i, edge) in tmp_edges_vec.iter().enumerate() {
       let e = edges.get_mut(i).unwrap();
-      *e.to = tmp_edges_vec[i].to;
-      *e.distance = tmp_edges_vec[i].distance;
-      *e.crowding_factor = tmp_edges_vec[i].crowding_factor;
+      *e.to = edge.to;
+      *e.distance = edge.distance;
+      *e.crowding_factor = edge.crowding_factor;
     }
   }
 
@@ -735,7 +703,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let ext_id2 = self.mapping.internal_to_external_ids[int_id2 as usize]
       .as_ref()
       .unwrap();
-    (self.config.dist_fn)(&ext_id1, &ext_id2)
+    (self.config.dist_fn)(ext_id1, ext_id2)
   }
 
   /// Replace the edge (u,v) with a new edge (u,w)
@@ -788,7 +756,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       return true;
     }
 
-    return false;
+    false
   }
 
   // TODO: can we run k-nn descent on the graph whenever we have free cycles?
@@ -877,7 +845,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         .is_sorted_by_key(|e| e.1));
 
       for referrer in self.backpointers[*i as usize].iter() {
-        assert!(self.debug_get_neighbor_indices(referrer).contains(&(i)));
+        assert!(self.debug_get_neighbor_indices(referrer).contains(i));
       }
     }
   }
@@ -888,7 +856,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         return true;
       }
     }
-    return false;
+    false
   }
 
   // TODO: expose an interface where the user provides one of their ids already
@@ -920,13 +888,12 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             // TODO: these fields are nonsense in this context
             // should they be Option?
             search_root_ancestor: *w.to,
-            search_parent: *v.to,
             search_depth: 2,
           }));
         }
       }
     }
-    return ret;
+    ret
   }
 
   fn get_farthest_neighbor(
@@ -934,7 +901,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     int_id: u32,
   ) -> (u32, f32) {
     let e = self.get_edges(int_id).last().unwrap();
-    (*e.to, *e.distance).clone()
+    (*e.to, *e.distance)
   }
 
   // TODO: return an iterator to avoid allocating a new vec
@@ -948,13 +915,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     }
     for w in self.backpointers[int_id as usize].iter() {
       let w_edges = self.get_edges(w);
-      let dist = w_edges
-        .iter()
-        .filter(|e| *e.to == int_id)
-        .next()
-        .unwrap()
-        .distance;
-      ret.push((w, dist.clone()));
+      let dist = w_edges.iter().find(|e| *e.to == int_id).unwrap().distance;
+      ret.push((w, *dist));
     }
     ret
   }
@@ -970,7 +932,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     q_int: u32,
     visited_nodes: &Vec<SearchResult<T>>,
     visited_nodes_distances_to_q: &HashMap<u32, (T, f32)>,
-  ) -> () {
+  ) {
     let mut w = VecDeque::new();
     for SearchResult {
       item: _,
@@ -984,7 +946,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
     let mut already_rrnped = HashSet::new();
 
-    while w.len() > 0 {
+    while !w.is_empty() {
       let (s_int, depth, dist_s_q) = w.pop_front().unwrap();
       let (_, dist_s_f) = self.get_farthest_neighbor(s_int);
       if depth < self.config.rrnp_max_depth && dist_s_q < &dist_s_f {
@@ -994,7 +956,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             && !visited_nodes_distances_to_q.contains_key(&e)
           {
             already_rrnped.insert(e);
-            let dist_e_q = (self.config.dist_fn)(&e_ext, &q);
+            let dist_e_q = (self.config.dist_fn)(e_ext, &q);
             self.insert_edge_if_closer(e, q_int, dist_e_q);
           }
         }
@@ -1028,7 +990,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let mut compute_distance = |x, y| {
       let dist = (self.config.dist_fn)(x, y);
       num_distance_computations += 1;
-      return dist;
+      dist
     };
     let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
     let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
@@ -1049,12 +1011,12 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // if the vec improves performance.
     // TODO: create a test case that fails because of this before fixing it. It
     // will make a good regression test.
-    assert!(self.starting_points_reservoir_sample.len() > 0);
+    assert!(!self.starting_points_reservoir_sample.is_empty());
     let mut min_r_dist = f32::INFINITY;
     let mut max_r_dist = f32::NEG_INFINITY;
     for StartPoint { id: r_int, .. } in &self.starting_points_reservoir_sample {
       let r_ext = self.mapping.int_to_ext(*r_int);
-      let r_dist = compute_distance(&q, &r_ext);
+      let r_dist = compute_distance(q, r_ext);
       if r_dist < min_r_dist {
         min_r_dist = r_dist;
       }
@@ -1068,7 +1030,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         Some(*r_int),
         r_dist,
         *r_int,
-        *r_int,
         0,
       )));
       match q_max_heap.peek() {
@@ -1077,7 +1038,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             r_ext.clone(),
             Some(*r_int),
             r_dist,
-            *r_int,
             *r_int,
             0,
           ));
@@ -1091,7 +1051,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
               Some(*r_int),
               r_dist,
               *r_int,
-              *r_int,
               0,
             ));
           }
@@ -1102,7 +1061,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // The main search loop. While unvisited nodes exist in r_min_heap, keep
     // searching.
     // lines 11 to 27 of the pseudocode
-    while r_min_heap.len() > 0 {
+    while !r_min_heap.is_empty() {
       while q_max_heap.len() > max_results {
         q_max_heap.pop();
       }
@@ -1129,7 +1088,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         let e_ext = self.mapping.int_to_ext(e);
         if !visited.contains(&e) {
           visited.insert(e);
-          let e_dist = compute_distance(&q, e_ext);
+          let e_dist = compute_distance(q, e_ext);
           visited_distances.insert(e, (e_ext.clone(), e_dist));
 
           if e_dist < f.dist || q_max_heap.len() < max_results {
@@ -1152,7 +1111,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
               Some(e),
               e_dist,
               sr.search_root_ancestor,
-              *sr_int,
               sr.search_depth + 1,
             ));
             r_min_heap.push(Reverse(SearchResult::new(
@@ -1160,7 +1118,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
               Some(e),
               e_dist,
               sr.search_root_ancestor,
-              *sr_int,
               sr.search_depth + 1,
             )));
           }
@@ -1176,7 +1133,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         i_ext.clone(),
         Some(i_int),
         *i_dist,
-        0,
         0,
         0,
       ));
@@ -1285,7 +1241,7 @@ macro_rules! get_edges_macro {
   };
 }
 
-fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash>(
+fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
   r_edges: &mut EdgeSliceMut,
   q_int: u32,
   visited_node_distances_to_q: &HashMap<u32, (T, f32)>,
@@ -1293,7 +1249,7 @@ fn apply_lgd<'a, T: Clone + Eq + std::hash::Hash>(
   let q_ix = r_edges.iter().position(|e| *e.to == q_int).unwrap();
   let q_r_dist = *r_edges.get(q_ix).unwrap().distance;
 
-  *r_edges.get_mut(q_ix).unwrap().crowding_factor = DEFAULT_LAMBDA as u8;
+  *r_edges.get_mut(q_ix).unwrap().crowding_factor = DEFAULT_LAMBDA;
 
   for s_ix in 0..r_edges.len() {
     let s_int = *r_edges.get(s_ix).unwrap().to;
@@ -1333,7 +1289,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   ///
   /// This is equivalent to one iteration of Algorithm 3 in
   /// "Approximate k-NN Graph Construction: A Generic Online Approach".
-  fn insert<R: RngCore>(&mut self, q: T, prng: &mut R) -> () {
+  fn insert<R: RngCore>(&mut self, q: T, prng: &mut R) {
     //TODO: return the index of the new data point
     //TODO: API for using internal ids, for improved speed.
     let SearchResults {
@@ -1372,12 +1328,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     self.maybe_insert_starting_point(q_int, prng);
   }
 
-  fn delete(&mut self, ext_id: T) -> () {
+  fn delete(&mut self, ext_id: T) {
     assert!(self.num_vertices + 1 > self.config.out_degree as u32);
     match self.mapping.external_to_internal_ids.get(&ext_id) {
       None => {
         // TODO: return a warning?
-        return;
       }
       Some(&int_id) => {
         let nbrs = get_edges_mut_macro!(self, int_id)
@@ -1436,12 +1391,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                 let nearest_neighbor = nearest_neighbors
                   .iter()
                   .map(|sr| (sr.internal_id.unwrap(), sr.dist))
-                  .filter(|(res_int_id, _dist)| {
+                  .find(|(res_int_id, _dist)| {
                     *res_int_id != int_id
                       && *res_int_id != referrer
-                      && !referrer_nbrs.contains(&res_int_id)
-                  })
-                  .next();
+                      && !referrer_nbrs.contains(res_int_id)
+                  });
 
                 match nearest_neighbor {
                   None => panic!(
@@ -1490,7 +1444,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
         *backpointers = SetU32::default();
         self.mapping.delete(&ext_id);
         self.num_vertices -= 1;
-        return;
       }
     }
   }
@@ -1536,7 +1489,6 @@ pub struct SearchResult<T> {
   pub dist: f32,
 
   search_root_ancestor: u32,
-  search_parent: u32,
   search_depth: u32,
 }
 
@@ -1546,7 +1498,6 @@ impl<T> SearchResult<T> {
     internal_id: Option<u32>,
     dist: f32,
     search_root_ancestor: u32,
-    search_parent: u32,
     search_depth: u32,
   ) -> SearchResult<T> {
     Self {
@@ -1554,7 +1505,6 @@ impl<T> SearchResult<T> {
       internal_id,
       dist,
       search_root_ancestor,
-      search_parent,
       search_depth,
     }
   }
@@ -1687,7 +1637,7 @@ impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
       .visited_nodes_distances_to_q
       .extend(other.visited_nodes_distances_to_q.clone());
     merged.search_stats = match (&self.search_stats, &other.search_stats) {
-      (Some(s1), Some(s2)) => Some(s1.merge(&s2)),
+      (Some(s1), Some(s2)) => Some(s1.merge(s2)),
       (Some(s1), None) => Some(*s1),
       (None, Some(s2)) => Some(*s2),
       (None, None) => None,
@@ -1732,7 +1682,7 @@ pub fn exhaustive_knn_graph<
 
   for i_ext in ids.iter() {
     let mut knn = BinaryHeap::new();
-    let i = g.mapping.insert(i_ext.clone());
+    let i = g.mapping.insert(i_ext);
     // TODO: prng in config.
     g.maybe_insert_starting_point(i, &mut thread_rng());
     for j_ext in ids.iter() {
@@ -1741,7 +1691,7 @@ pub fn exhaustive_knn_graph<
       }
       let j = g.mapping.insert(*j_ext);
       let dist = (config.dist_fn)(i_ext, j_ext);
-      knn.push(SearchResult::new(j, Some(j), dist, 0, 0, 0));
+      knn.push(SearchResult::new(j, Some(j), dist, 0, 0));
 
       while knn.len() > config.out_degree as usize {
         knn.pop();
@@ -1781,7 +1731,7 @@ mod tests {
   use rand::SeedableRng;
   use rand_xoshiro::Xoshiro256StarStar;
 
-  type NHH = BuildHasherDefault<NoHashHasher<u32>>;
+  type Nhh = BuildHasherDefault<NoHashHasher<u32>>;
 
   // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
   // PrimitiveToF32 mess is necessary. .into() is much slower.
@@ -1830,14 +1780,14 @@ mod tests {
   fn mk_config<'a, T>(
     capacity: u32,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-  ) -> KNNGraphConfig<'a, T, NHH> {
+  ) -> KNNGraphConfig<'a, T, Nhh> {
     let out_degree = 5;
     let num_searchers = 5;
     let use_rrnp = false;
     let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
-    KNNGraphConfig::<'a, T, NHH> {
+    KNNGraphConfig::<'a, T, Nhh> {
       capacity,
       out_degree,
       num_searchers,
@@ -1857,7 +1807,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let g: DenseKNNGraph<u32, NHH> =
+    let g: DenseKNNGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
@@ -1876,7 +1826,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let g: DenseKNNGraph<u32, NHH> =
+    let g: DenseKNNGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
@@ -1928,7 +1878,7 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
-    let mut g: DenseKNNGraph<u32, NHH> =
+    let mut g: DenseKNNGraph<u32, Nhh> =
       DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
@@ -1938,7 +1888,7 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
-    let mut g: DenseKNNGraph<u32, NHH> =
+    let mut g: DenseKNNGraph<u32, Nhh> =
       DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
@@ -1948,7 +1898,7 @@ mod tests {
   fn test_insert_edge_if_closer() {
     let mut config = mk_config(3, &|&_x, &_y| 1.0);
     config.out_degree = 1;
-    let mut g: DenseKNNGraph<u32, NHH> = DenseKNNGraph::empty(config);
+    let mut g: DenseKNNGraph<u32, Nhh> = DenseKNNGraph::empty(config);
 
     // see note in test_insert_vertex
     g.mapping.insert(&0);
@@ -1986,7 +1936,7 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
-    let mut g: DenseKNNGraph<u32, NHH> = exhaustive_knn_graph(
+    let mut g: DenseKNNGraph<u32, Nhh> = exhaustive_knn_graph(
       vec![&0, &1, &2, &3, &4, &5],
       mk_config(11, dist_fn),
     );
@@ -2016,7 +1966,7 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
-    let mut g: KNN<u32, NHH> = KNN::new(mk_config(10, dist_fn));
+    let mut g: KNN<u32, Nhh> = KNN::new(mk_config(10, dist_fn));
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     g.insert(0, &mut prng);
 
@@ -2031,7 +1981,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let mut g: DenseKNNGraph<u32, NHH> =
+    let mut g: DenseKNNGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.delete(3);
     g.consistency_check();
@@ -2063,7 +2013,7 @@ mod tests {
     let mut config = mk_config(30, dist_fn);
     config.out_degree = 5;
     let ids = (0u32..16).collect::<Vec<_>>();
-    let mut g: DenseKNNGraph<u32, NHH> =
+    let mut g: DenseKNNGraph<u32, Nhh> =
       exhaustive_knn_graph(ids.iter().collect(), config);
     g.consistency_check();
     g.delete(7);
@@ -2090,7 +2040,7 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     config.use_rrnp = true;
-    let mut g: DenseKNNGraph<u32, NHH> =
+    let mut g: DenseKNNGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
@@ -2117,8 +2067,16 @@ mod tests {
     for use_rrnp in [false, true] {
       for use_lgd in [false, true] {
         let s = RandomState::new();
-        let config =
-          KNNGraphConfig::new(50, 5, 5, dist_fn, s, use_rrnp, 2, use_lgd);
+        let config = KNNGraphConfig {
+          capacity: 50,
+          out_degree: 5,
+          num_searchers: 5,
+          dist_fn,
+          build_hasher: s,
+          use_rrnp,
+          rrnp_max_depth: 2,
+          use_lgd,
+        };
 
         let g = exhaustive_knn_graph(
           vec![
@@ -2215,7 +2173,6 @@ mod tests {
           internal_id: Some(1),
           dist: 1.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2223,7 +2180,6 @@ mod tests {
           internal_id: Some(2),
           dist: 2.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
       ],
@@ -2233,7 +2189,6 @@ mod tests {
           internal_id: Some(1),
           dist: 1.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2241,7 +2196,6 @@ mod tests {
           internal_id: Some(2),
           dist: 2.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2249,7 +2203,6 @@ mod tests {
           internal_id: Some(3),
           dist: 3.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
       ],
@@ -2267,7 +2220,6 @@ mod tests {
           internal_id: Some(3),
           dist: 3.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2275,7 +2227,6 @@ mod tests {
           internal_id: Some(4),
           dist: 4.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
       ],
@@ -2285,7 +2236,6 @@ mod tests {
           internal_id: Some(1),
           dist: 1.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2293,7 +2243,6 @@ mod tests {
           internal_id: Some(3),
           dist: 3.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
         SearchResult {
@@ -2301,7 +2250,6 @@ mod tests {
           internal_id: Some(4),
           dist: 4.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0,
         },
       ],
@@ -2322,7 +2270,6 @@ mod tests {
           internal_id: Some(1),
           dist: 1.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2330,7 +2277,6 @@ mod tests {
           internal_id: Some(2),
           dist: 2.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2338,7 +2284,6 @@ mod tests {
           internal_id: Some(3),
           dist: 3.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2346,7 +2291,6 @@ mod tests {
           internal_id: Some(4),
           dist: 4.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
       ]
@@ -2359,7 +2303,6 @@ mod tests {
           internal_id: Some(1),
           dist: 1.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2367,7 +2310,6 @@ mod tests {
           internal_id: Some(2),
           dist: 2.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2375,7 +2317,6 @@ mod tests {
           internal_id: Some(3),
           dist: 3.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
         SearchResult {
@@ -2383,7 +2324,6 @@ mod tests {
           internal_id: Some(4),
           dist: 4.0,
           search_root_ancestor: 0,
-          search_parent: 0,
           search_depth: 0
         },
       ],

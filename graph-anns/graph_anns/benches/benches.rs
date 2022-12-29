@@ -16,7 +16,7 @@ use rand_core::RngCore;
 use rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 
-type NHH = BuildHasherDefault<NoHashHasher<u32>>;
+type Nhh = BuildHasherDefault<NoHashHasher<u32>>;
 
 /// Hamming distance between two random 640-bit vectors which are uniquely
 /// identified by x and y.
@@ -29,10 +29,10 @@ fn hamming_dist(x: &u32, y: &u32) -> f32 {
     let y_rand = y_prng.next_u64();
     result += (x_rand ^ y_rand).count_ones();
   }
-  return result as f32;
+  result as f32
 }
 
-fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, NHH> {
+fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, Nhh> {
   let out_degree = 5;
   let num_searchers = 5;
   let use_rrnp = false;
@@ -40,7 +40,7 @@ fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, NHH> {
   let use_lgd = false;
   let dist_fn = &hamming_dist;
   let build_hasher = nohash_hasher::BuildNoHashHasher::default();
-  KNNGraphConfig::<'a, u32, NHH> {
+  KNNGraphConfig::<'a, u32, Nhh> {
     capacity,
     out_degree,
     num_searchers,
@@ -58,7 +58,7 @@ fn construct_graph<'a>(
 ) -> DenseKNNGraph<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
   let ids = Vec::<u32>::from_iter(0..n);
   let g = exhaustive_knn_graph(ids.iter().collect(), mk_config(capacity));
-  return g;
+  g
 }
 
 fn bench_construct_exhaustive_graph(c: &mut Criterion) {
@@ -93,7 +93,7 @@ fn bench_insert_one(c: &mut Criterion) {
 fn construct_graph_approx_iterative(n: u32) {
   let mut prng = Xoshiro256StarStar::seed_from_u64(12);
   let ids = Vec::<u32>::from_iter(0..50);
-  let mut g: DenseKNNGraph<u32, NHH> =
+  let mut g: DenseKNNGraph<u32, Nhh> =
     exhaustive_knn_graph(ids.iter().collect(), mk_config(n));
   for q in 50..n {
     g.insert(q, &mut prng);
@@ -108,11 +108,10 @@ fn bench_construct_graph_approx_iterative(c: &mut Criterion) {
   group.measurement_time(Duration::from_secs(60));
   group.sampling_mode(SamplingMode::Flat);
 
-  for n in [500].iter() {
-    group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
-      b.iter(|| construct_graph_approx_iterative(n))
-    });
-  }
+  let n = &500;
+  group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
+    b.iter(|| construct_graph_approx_iterative(n))
+  });
 }
 
 criterion_group!(
