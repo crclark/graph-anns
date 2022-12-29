@@ -169,21 +169,21 @@ fn write_search_stats(
   line_writer: &mut LineWriter<File>,
   args: Args,
 ) {
-  //parallelism,rrnp,lgd,rrnp_depth,out_degree,num_searchers
   match search_stats {
     Some(s) => {
       write!(
         line_writer,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
         found_closest as u8,
         s.nearest_neighbor_distance,
         s.num_distance_computations,
         s.distance_from_nearest_starting_point,
         s.distance_from_farthest_starting_point,
         s.search_duration.as_micros(),
-        s.largest_distance_single_hop,
-        s.smallest_distance_single_hop,
+        s.largest_distance_improvement_single_hop,
+        s.smallest_distance_improvement_single_hop,
         s.nearest_neighbor_path_length,
+        s.num_visited,
         args.parallel,
         args.rrnp,
         args.lgd,
@@ -191,7 +191,8 @@ fn write_search_stats(
         args.out_degree,
         args.num_searchers,
         args.experiment_name,
-      );
+      )
+      .unwrap();
     }
     None => {}
   }
@@ -246,7 +247,7 @@ fn open_csv(args: Args) -> LineWriter<File> {
     .unwrap();
   let mut line_writer = LineWriter::new(file);
   if !existed {
-    line_writer.write_all(b"found_closest,nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_single_hop,smallest_distance_single_hop,nearest_neighbor_path_length,parallelism,rrnp,lgd,rrnp_depth,out_degree,num_searchers,experiment_name\n").unwrap();
+    line_writer.write_all(b"found_closest,nearest_neighbor_distance,num_distance_computations,distance_from_nearest_starting_point,distance_from_farthest_starting_point,search_duration_microseconds,largest_distance_improvement_single_hop,smallest_distance_improvement_single_hop,nearest_neighbor_path_length,num_visited,parallelism,rrnp,lgd,rrnp_depth,out_degree,num_searchers,experiment_name\n").unwrap();
   }
   line_writer
 }

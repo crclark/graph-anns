@@ -993,8 +993,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // a field and not a hashmap?
     // TODO: disable stat tracking on insertion, make it optional elsewhere.
     // tracks the starting node of the search path for each node traversed.
-    let mut largest_distance_single_hop = f32::NEG_INFINITY;
-    let mut smallest_distance_single_hop = f32::INFINITY;
+    let mut largest_distance_improvement_single_hop = f32::NEG_INFINITY;
+    let mut smallest_distance_improvement_single_hop = f32::INFINITY;
 
     // Initialize our search with num_searchers initial points.
     // lines 2 to 10 of the pseudocode
@@ -1086,12 +1086,18 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
           visited_distances.insert(e, (e_ext.clone(), e_dist));
 
           if e_dist < f.dist || q_max_heap.len() < max_results {
-            let hop_distance = e_dist - sr.dist;
-            if hop_distance > largest_distance_single_hop {
-              largest_distance_single_hop = hop_distance;
+            let hop_distance_improvement = -(e_dist - sr.dist);
+            if hop_distance_improvement
+              > largest_distance_improvement_single_hop
+            {
+              largest_distance_improvement_single_hop =
+                hop_distance_improvement;
             }
-            if hop_distance < smallest_distance_single_hop {
-              smallest_distance_single_hop = hop_distance;
+            if hop_distance_improvement
+              < smallest_distance_improvement_single_hop
+            {
+              smallest_distance_improvement_single_hop =
+                hop_distance_improvement;
             }
             // TODO: use CoW to reduce duplicated objects
             q_max_heap.push(SearchResult::new(
@@ -1137,6 +1143,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     // let nearest_neighbor_starting_point = search_root_ancestor[r_min_heap.peek().unwrap().0.internal_id.unwrap();]
     // let distance_from_nearest_neighbor_to_its_starting_point =
 
+    let num_visited = visited_vec.len();
+
     SearchResults {
       approximate_nearest_neighbors,
       visited_nodes: visited_vec,
@@ -1146,10 +1154,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         distance_from_nearest_starting_point: min_r_dist,
         distance_from_farthest_starting_point: max_r_dist,
         search_duration: Instant::now() - query_start,
-        largest_distance_single_hop,
-        smallest_distance_single_hop,
+        largest_distance_improvement_single_hop,
+        smallest_distance_improvement_single_hop,
         nearest_neighbor_path_length,
         nearest_neighbor_distance,
+        num_visited,
         // distance_from_nearest_neighbor_to_its_starting_point: todo!(),
       }),
     }
@@ -1539,14 +1548,17 @@ pub struct SearchStats {
   pub distance_from_farthest_starting_point: f32,
   /// Total duration of the search call.
   pub search_duration: Duration,
-  /// Sum total of the duration of all distance calls.
-  pub largest_distance_single_hop: f32,
-  /// The smallest distance moved towards the target point by a single hop from
+  /// The largest distance moved towards the target point by a single hop from
   /// one node to another node adjacent to it.
-  pub smallest_distance_single_hop: f32,
+  pub largest_distance_improvement_single_hop: f32,
+  /// The smallest distance moved towards the target point by a single hop from
+  /// one node to another node adjacent to it. If this is negative, it means
+  /// we moved away from the target point!
+  pub smallest_distance_improvement_single_hop: f32,
   /// The total number of hops from the starting point to the nearest neighbor
   /// that was found.
   pub nearest_neighbor_path_length: usize,
+  pub num_visited: usize,
   // TODO
   // /// The distance from the nearest neighbor to the starting point that the searcher that found it started from.
   // pub distance_from_nearest_neighbor_to_its_starting_point: f32,
@@ -1567,12 +1579,12 @@ impl SearchStats {
         .distance_from_farthest_starting_point
         .max(other.distance_from_farthest_starting_point),
       search_duration: self.search_duration + other.search_duration,
-      largest_distance_single_hop: self
-        .largest_distance_single_hop
-        .max(other.largest_distance_single_hop),
-      smallest_distance_single_hop: self
-        .smallest_distance_single_hop
-        .min(other.smallest_distance_single_hop),
+      largest_distance_improvement_single_hop: self
+        .largest_distance_improvement_single_hop
+        .max(other.largest_distance_improvement_single_hop),
+      smallest_distance_improvement_single_hop: self
+        .smallest_distance_improvement_single_hop
+        .min(other.smallest_distance_improvement_single_hop),
       nearest_neighbor_path_length: if self.nearest_neighbor_distance
         < other.nearest_neighbor_distance
       {
@@ -1580,6 +1592,7 @@ impl SearchStats {
       } else {
         other.nearest_neighbor_path_length
       },
+      num_visited: self.num_visited + other.num_visited,
     }
   }
 }
