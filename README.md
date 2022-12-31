@@ -426,6 +426,8 @@ Nodes pointing to a given node are often 5+ hops away if we only travel using ou
 
 Injecting random nodes into the search instead of using backpointers was also ineffective.
 
+Limiting the number of backpointers per node also reduced performance significantly.
+
 **Backpointers and an out-degree of 25 gives similar recall numbers to no backpointers and out-degree of 100, but with much, much faster search speed.**
 
 Why? I believe it's because of two main things:
@@ -452,6 +454,18 @@ no-backpointers
 no-backpointers-inject-random-nodes
 only-search-with-backpointers
 unreciprocated-node-distance-histogram
+
+### Store backpointers in vecs
+
+I think we mostly just traverse them. Set operations are rarely, if ever, used, and the cardinality of the vec is small enough that exhaustive search is probably fine in the few cases that we need to look up or delete individual items.
+
+results for 5M inserts, 7 out-degree:
+621 seconds on branch vs 675 on main
+120.1g VIRT, 1.5g RES vs 120.3g VIRT, 1.7g RES on main
+
+tl;dr: 10% reduction in running time and memory usage
+
+Amusingly, performance in our microbenchmark insert_one/500 regressed, likely because it was hitting the fast case for the tinyset -- all internal ids in the benchmarks are small integers because the graphs are small.
 
 ### FP16 stored distances
 
