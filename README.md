@@ -455,6 +455,12 @@ no-backpointers-inject-random-nodes
 only-search-with-backpointers
 unreciprocated-node-distance-histogram
 
+#### Backpointer elimination ideas I didn't try
+
+What if every time we call insert_edge_if_closer, we sometimes randomly insert the edge even if it isn't closer?
+
+What if we created something like spurious backpointers, where we create a backpointer for 100 nodes even if out-degree is only ten? Very half-baked idea.
+
 ### Store backpointers in vecs
 
 I think we mostly just traverse them. Set operations are rarely, if ever, used, and the cardinality of the vec is small enough that exhaustive search is probably fine in the few cases that we need to look up or delete individual items.
@@ -474,6 +480,8 @@ branch: 52229849
 zero starting  capacity works better
 
 3 mins into 1B test, inserting at ~70k/sec
+
+seems to actually be slower on the 1B test. tinyset is doing ~90k/sec after 3 mins.
 
 ### FP16 stored distances
 
