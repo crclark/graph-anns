@@ -250,12 +250,12 @@ fn main_single_threaded(args: Args) {
   // TODO: this is absurdly slow to build a graph, even for just 1M elements.
   // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
   // distance function unless there's something egregiously broken there.
-  let subset_size: u32 = 5_000_000;
-  let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
+  let subset_size: u32 = args.subset_size;
+  let base_path = Path::new(&args.texmex_path);
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
-  let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
+  let query_path = Path::new(&args.query_path);
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_5M.ivecs_array");
+  let gnd_path = Path::new(&args.gnd_path);
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
@@ -581,14 +581,14 @@ fn load_texmex_to_dense_par(
 
 fn main_parallel(args: Args) {
   // NOTE: change gnd_path when you change this
-  let subset_size: u32 = 5_000_000;
+  let subset_size: u32 = args.subset_size;
   let num_graphs: u32 = args.parallel as u32;
-  let base_path = Path::new("/mnt/970pro/anns/bigann_base.bvecs_array");
+  let base_path = Path::new(&args.texmex_path);
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
-  let query_path = Path::new("/mnt/970pro/anns/bigann_query.bvecs_array");
+  let query_path = Path::new(&args.query_path);
   let query_vecs = texmex::Vecs::<u8>::new(query_path, 128).unwrap();
   // NOTE: change this path depending on subset_size
-  let gnd_path = Path::new("/mnt/970pro/anns/gnd/idx_5M.ivecs_array");
+  let gnd_path = Path::new(&args.gnd_path);
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
@@ -629,6 +629,14 @@ struct Args {
   output_csv: String,
   #[arg(long, default_value = "default")]
   experiment_name: String,
+  #[arg(long, default_value = "/mnt/970pro/anns/bigann_base.bvecs_array")]
+  texmex_path: String,
+  #[arg(long, default_value_t = 5_000_000)]
+  subset_size: u32,
+  #[arg(long, default_value = "/mnt/970pro/anns/bigann_query.bvecs_array")]
+  query_path: String,
+  #[arg(long, default_value = "/mnt/970pro/anns/gnd/idx_5M.ivecs_array")]
+  gnd_path: String,
 }
 
 fn main() {
