@@ -414,29 +414,44 @@ Removing backpointers also gives us more room to add a higher out_degree. And hi
 
 To be safe, I think we should implement our long-desired search statistics system before proceeding. I want stats on both the graph and the search.
 
-Search stats:
+#### Results
 
-- Number of distance computations.
-- Number of nodes visited.
-- Distance traveled from nearest starting point to nearest neighbor found.
-- distance moved towards nearest neighbor found on each hop.
-- Number of distance computations that discovered nodes that were in the wrong direction relative to the node that had already been expanded.
-- Search duration, wall clock time.
-- Sum of duration of all distance calls.
+Backpointers contribute significantly to the quality of results. In the 5M subset of texmex, 62% of edges are unreciprocated, so edges + backpointers give us a much larger number of possible moves at each step.
 
-^ want to output these into a csv so we can see how they change with changes that affect the actual search algorithm. Also want to understand which of the above actually explain search duration. I am particularly interested in how the structure of the graph affects it.
+Higher-quality k-nn graphs also don't help much -- using exhaustive knn on large subsets of the graph has very small effects on results.
 
+The distribution of backpointers is also interesting. Even with out-degree 7, some nodes will have 100 backpointers.
 
+Nodes pointing to a given node are often 5+ hops away if we only travel using out-links, so they provide immense shortcuts through the graph.
 
-Graph stats:
-- max distance between any two nodes (estimate, sample?)
-- average distance to nearest neighbor
-- average distance to farthest directly-connected neighbor
-- max distance to nearest neighbor (outlier)
-- min distance to nearest neighbor
-- max distance to farthest directly-connected neighbor
-- min distance to farthest directly-connected neighbor
-- Anything we can get on the distribution of nodes within the graph. Clustering algorithms? Fancy graph analysis metrics that I can no longer remember?
+Injecting random nodes into the search instead of using backpointers was also ineffective.
+
+**Backpointers and an out-degree of 25 gives similar recall numbers to no backpointers and out-degree of 100, but with much, much faster search speed.**
+
+Why? I believe it's because of two main things:
+
+- Important hub nodes are given a high effective out-degree.
+- Backpointer links can bridge parts of the graph that were previously unconnected. Consider this 1D nn set:
+
+1 2 3             10 11 12
+
+with out-degree 2, we would form two disconnected cliques. If we insert 6 without backpointers, 6 wouldn't be closer to 3 or 10 than its existing links, and would be completely disconnected from the rest of the graph unless we were lucky enough to start the search at 6. With backpointers, it becomes reachable from 3 and 10.
+
+So topologically, two things are happening:
+
+- Without backpointers, newly inserted nodes might not be closer than existing neighbors, and be effectively unreachable through out-links.
+- With backpointers, saturated nodes can gain more links to other parts of the graph.
+
+I also tried eliminating out-links from being considered during search and only using backpointers, but that also gave bad results. We need both types of edges.
+
+It might be nice to unify out-links and backpointers into one data structure for simplicity, and perhaps to unlock new graph construction algorithms that choose what to link in a more intelligent fashion.
+
+#### Branches used in investigation
+
+no-backpointers
+no-backpointers-inject-random-nodes
+only-search-with-backpointers
+unreciprocated-node-distance-histogram
 
 ### FP16 stored distances
 
