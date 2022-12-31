@@ -435,7 +435,7 @@ Why? I believe it's because of two main things:
 
 1 2 3             10 11 12
 
-with out-degree 2, we would form two disconnected cliques. If we insert 6 without backpointers, 6 wouldn't be closer to 3 or 10 than its existing links, and would be completely disconnected from the rest of the graph unless we were lucky enough to start the search at 6. With backpointers, it becomes reachable from 3 and 10.
+with out-degree 2, we would form two disconnected cliques. If we insert 6 without backpointers, 6 wouldn't be closer to 3 or 10 than its existing links, and would be completely disconnected from the rest of the graph unless we were lucky enough to start the search at 6. With backpointers, it becomes reachable from 3 and 10. Furthermore, the two cliques become mutually connected.
 
 So topologically, two things are happening:
 
