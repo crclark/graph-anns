@@ -142,7 +142,7 @@ fn load_texmex_to_dense(
 
   let start_inserting = Instant::now();
 
-  for i in 0..subset_size {
+  for i in 0..args.early_exit_after_num_insertions.unwrap_or(subset_size) {
     if i % 100000 == 0 {
       println!("inserting {}", i);
       println!("elapsed: {:?}", start_inserting.elapsed());
@@ -563,7 +563,7 @@ fn load_texmex_to_dense_par(
   )
   .unwrap();
 
-  (0..subset_size)
+  (0..args.early_exit_after_num_insertions.unwrap_or(subset_size))
     .into_par_iter()
     .progress_with_style(style)
     .for_each(|i| {
@@ -637,6 +637,8 @@ struct Args {
   query_path: String,
   #[arg(long, default_value = "/mnt/970pro/anns/gnd/idx_5M.ivecs_array")]
   gnd_path: String,
+  #[arg(long)]
+  early_exit_after_num_insertions: Option<u32>,
 }
 
 fn main() {

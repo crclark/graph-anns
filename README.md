@@ -467,6 +467,14 @@ tl;dr: 10% reduction in running time and memory usage
 
 Amusingly, performance in our microbenchmark insert_one/500 regressed, likely because it was hitting the fast case for the tinyset -- all internal ids in the benchmarks are small integers because the graphs are small.
 
+backpointers_sets_sum_capacity
+main:   119182633
+branch: 52229849
+
+zero starting  capacity works better
+
+3 mins into 1B test, inserting at ~70k/sec
+
 ### FP16 stored distances
 
 recompute distance on the fly if two distances are exactly equal or one or the other is fp16::max or fp16::min.
