@@ -2,7 +2,6 @@
 extern crate rand;
 extern crate rand_xoshiro;
 extern crate soa_derive;
-extern crate tinyset;
 
 use soa_derive::StructOfArray;
 
@@ -18,7 +17,6 @@ use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use std::time::Duration;
 use std::time::Instant;
-use tinyset::SetU32;
 
 const DEFAULT_LAMBDA: u8 = 0;
 
@@ -507,7 +505,7 @@ pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
   /// Maintains an association between vertices and the vertices that link out to
   /// them. In other words, each backpointers[i] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
-  pub backpointers: Vec<SetU32>,
+  pub backpointers: Vec<Vec<u32>>,
   pub config: KNNGraphConfig<'a, T, S>,
   /// The set of internal ids to start searches from. These are randomly
   /// selected using reservoir sampling as points are inserted into the graph.
@@ -566,11 +564,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         .iter()
         .map(|s| s.capacity())
         .sum(),
-      backpointers_sets_mem_used: self
-        .backpointers
-        .iter()
-        .map(|s| s.mem_used())
-        .sum(),
+      backpointers_sets_mem_used: 0,
       backpointers_smallest_set_len: self
         .backpointers
         .iter()
@@ -613,7 +607,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let mut backpointers = Vec::with_capacity(config.capacity as usize);
 
     for _ in 0..config.capacity {
-      backpointers.push(SetU32::new());
+      //TODO: experiment with different capacities
+      backpointers.push(Vec::<u32>::new());
     }
 
     let num_vertices = 0;
@@ -751,8 +746,12 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       *most_distant_edge.distance = dist;
       *most_distant_edge.crowding_factor = DEFAULT_LAMBDA;
       self.sort_edges(from);
-      self.backpointers[old as usize].remove(from);
-      self.backpointers[to as usize].insert(from);
+      self.backpointers[old as usize] = self.backpointers[old as usize]
+        .iter()
+        .filter(|&b| *b != from)
+        .map(|&b| b.clone() as u32)
+        .collect();
+      self.backpointers[to as usize].push(from);
       return true;
     }
 
@@ -785,7 +784,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       *edge.distance = dist;
       *edge.crowding_factor = DEFAULT_LAMBDA;
       let s = &mut self.backpointers[*nbr as usize];
-      s.insert(u);
+      s.push(u);
     }
 
     self.num_vertices += 1;
@@ -830,7 +829,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
           panic!("Self loop at node {}", i);
         }
         let nbr_backptrs = &self.backpointers[*e.to as usize];
-        if !nbr_backptrs.contains(*i) {
+        if !nbr_backptrs.contains(i) {
           panic!(
             "Vertex {} links to {} but {}'s backpointers don't include {}!",
             i, *e.to, *e.to, i
@@ -845,7 +844,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         .is_sorted_by_key(|e| e.1));
 
       for referrer in self.backpointers[*i as usize].iter() {
-        assert!(self.debug_get_neighbor_indices(referrer).contains(i));
+        assert!(self.debug_get_neighbor_indices(*referrer).contains(i));
       }
     }
   }
@@ -914,9 +913,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       ret.push((*w.to, *w.distance));
     }
     for w in self.backpointers[int_id as usize].iter() {
-      let w_edges = self.get_edges(w);
+      let w_edges = self.get_edges(*w);
       let dist = w_edges.iter().find(|e| *e.to == int_id).unwrap().distance;
-      ret.push((w, *dist));
+      ret.push((*w, *dist));
     }
     ret
   }
@@ -1081,15 +1080,15 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
           .filter(|e| {
             !(ignore_occluded && *e.crowding_factor as f32 >= average_lambda)
           })
-          .map(|e| *e.to),
+          .map(|e| e.to),
       );
 
       for e in r_nbrs_iter {
-        let e_ext = self.mapping.int_to_ext(e);
+        let e_ext = self.mapping.int_to_ext(*e);
         if !visited.contains(&e) {
-          visited.insert(e);
+          visited.insert(*e);
           let e_dist = compute_distance(q, e_ext);
-          visited_distances.insert(e, (e_ext.clone(), e_dist));
+          visited_distances.insert(*e, (e_ext.clone(), e_dist));
 
           if e_dist < f.dist || q_max_heap.len() < max_results {
             let hop_distance_improvement = -(e_dist - sr.dist);
@@ -1108,14 +1107,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
             // TODO: use CoW to reduce duplicated objects
             q_max_heap.push(SearchResult::new(
               e_ext.clone(),
-              Some(e),
+              Some(*e),
               e_dist,
               sr.search_root_ancestor,
               sr.search_depth + 1,
             ));
             r_min_heap.push(Reverse(SearchResult::new(
               e_ext.clone(),
-              Some(e),
+              Some(*e),
               e_dist,
               sr.search_root_ancestor,
               sr.search_depth + 1,
@@ -1361,9 +1360,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           // upper bound distance, computed as dist(u,v) + dist(v,w). This
           // requires the triangle inequality to hold for the user's metric
           let referrer_nbrs: HashSet<u32> =
-            self.get_edges(referrer).iter().map(|x| *x.to).collect();
+            self.get_edges(*referrer).iter().map(|x| *x.to).collect();
           let mut referrer_nbrs_of_nbrs =
-            self.two_hop_neighbors_and_dist_upper_bounds(referrer);
+            self.two_hop_neighbors_and_dist_upper_bounds(*referrer);
 
           let (new_referent, dist_referrer_new_referent) = loop {
             match referrer_nbrs_of_nbrs.pop() {
@@ -1380,7 +1379,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                   approximate_nearest_neighbors: nearest_neighbors,
                   ..
                 } = self.query_internal(
-                  self.mapping.int_to_ext(referrer),
+                  self.mapping.int_to_ext(*referrer),
                   // we need to find one new node who isn't a neighbor, the
                   // node being deleted, or referrer itself, so we search for
                   // one more than that number.
@@ -1393,7 +1392,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                   .map(|sr| (sr.internal_id.unwrap(), sr.dist))
                   .find(|(res_int_id, _dist)| {
                     *res_int_id != int_id
-                      && *res_int_id != referrer
+                      && *res_int_id != *referrer
                       && !referrer_nbrs.contains(res_int_id)
                   });
 
@@ -1408,10 +1407,10 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
               }
               Some(Reverse(SearchResult { item: id, .. })) => {
                 if id != int_id
-                  && id != referrer
+                  && id != *referrer
                   && !referrer_nbrs.contains(&id)
                 {
-                  let dist = self.dist_int(referrer, id);
+                  let dist = self.dist_int(*referrer, id);
                   break (id, dist);
                 }
               }
@@ -1419,7 +1418,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           };
 
           self.replace_edge_no_backptr_update(
-            referrer,
+            *referrer,
             int_id,
             new_referent,
             dist_referrer_new_referent,
@@ -1428,7 +1427,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           // Insert referrer into the backpointers of the new referent.
           let new_referent_backpointers =
             self.backpointers.get_mut(new_referent as usize).unwrap();
-          new_referent_backpointers.insert(referrer);
+          new_referent_backpointers.push(*referrer);
         }
 
         // Remove backpointers for all nodes the deleted node was pointing to.
@@ -1436,12 +1435,15 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           let nbr_backpointers =
             self.backpointers.get_mut(nbr as usize).unwrap();
 
-          nbr_backpointers.remove(int_id);
+          let ix_to_remove =
+            nbr_backpointers.iter().position(|x| *x == int_id).unwrap();
+          nbr_backpointers.swap_remove(ix_to_remove);
         }
 
         // Reset backpointers for the deleted node.
         let backpointers = self.backpointers.get_mut(int_id as usize).unwrap();
-        *backpointers = SetU32::default();
+        *backpointers =
+          Vec::<u32>::with_capacity(self.config.out_degree as usize);
         self.mapping.delete(&ext_id);
         self.num_vertices -= 1;
       }
@@ -1706,7 +1708,7 @@ pub fn exhaustive_knn_graph<
       *e.distance = dist;
       *e.crowding_factor = DEFAULT_LAMBDA;
       let s = &mut g.backpointers[id as usize];
-      s.insert(i);
+      s.push(i);
     }
   }
 

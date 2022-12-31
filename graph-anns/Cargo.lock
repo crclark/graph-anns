@@ -290,7 +290,6 @@ dependencies = [
  "rand_core",
  "rand_xoshiro",
  "soa_derive",
- "tinyset",
 ]
 
 [[package]]
