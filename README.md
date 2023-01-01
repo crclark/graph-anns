@@ -483,6 +483,14 @@ zero starting  capacity works better
 
 seems to actually be slower on the 1B test. tinyset is doing ~90k/sec after 3 mins.
 
+Full results: run out of memory at the same time regardless of vec or tinyset, but vec seems to win in overall speed on smaller amounts of data. We'll keep it.
+
+Vec backpointers light failure at 1:23:00 – dropped to ~9k/sec at around 280M inserted.
+Gave up at 1.5 hours in — 282M inserted, ~5k/sec. VIRT 249.8g RES 116.9g
+
+Exactly the same for tinyset version: at :1.5 hours, ~2k/sec with 282M inserted. VIRT 250.8g, RES 114.9g.
+
+
 ### FP16 stored distances
 
 recompute distance on the fly if two distances are exactly equal or one or the other is fp16::max or fp16::min.
