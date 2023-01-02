@@ -506,7 +506,10 @@ See the `no-stored-distances` branch.
 
 Even heaptrack doesn't show all of the memory usage I am expecting to see based on RES. Could malloc overhead be the culprit? Let's try a different allocator.
 
-Marginally slower.
+Result: significantly slower, with a slight space savings
+
+recall compute time on main: 15s. RES on main: 1.5g
+recall compute time on jemalloc: 24s. RES on jemalloc: 1.4g
 
 ### Temporary data structures during search becoming large
 
