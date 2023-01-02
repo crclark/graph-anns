@@ -506,6 +506,8 @@ See the `no-stored-distances` branch.
 
 Even heaptrack doesn't show all of the memory usage I am expecting to see based on RES. Could malloc overhead be the culprit? Let's try a different allocator.
 
+Marginally slower.
+
 ### Temporary data structures during search becoming large
 
 Yet another possibility is that temporary structures allocated during searches are large, and so our steady-state memory consumption while inserting looks higher than expected because we aren't accounting for those structures. On the other hand, when we pause after inserting everything, the RES number doesn't drop...
