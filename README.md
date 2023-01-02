@@ -498,6 +498,10 @@ recompute distance on the fly if two distances are exactly equal or one or the o
 ### No stored distances
 Honestly don't know if we use them for anything important.
 
+Result: massive performance decrease. The biggest use is insert_edge_if_closer, which we call on all nodes we visited during the search when inserting a new node. We used binary search with the distance callback instead of stored distances, but `log(out_degree)*num_visited` extra distance computations ends up being a very large number.
+
+See the `no-stored-distances` branch.
+
 ### Try jemalloc
 
 Even heaptrack doesn't show all of the memory usage I am expecting to see based on RES. Could malloc overhead be the culprit? Let's try a different allocator.
