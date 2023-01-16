@@ -514,3 +514,27 @@ recall compute time on jemalloc: 24s. RES on jemalloc: 1.4g
 ### Temporary data structures during search becoming large
 
 Yet another possibility is that temporary structures allocated during searches are large, and so our steady-state memory consumption while inserting looks higher than expected because we aren't accounting for those structures. On the other hand, when we pause after inserting everything, the RES number doesn't drop...
+
+# 1B texmex results
+
+./texmex_tests --parallel 48 --rrnp --lgd --texmex-path /mnt/disks/nvme0n1/graph-anns-texmex-data/bigann_base.bvecs_array --subset-size 1000000000 --query-path /mnt/disks/nvme0n1/graph-anns-texmex-data/bigann_query.bvecs_array --gnd-path /mnt/disks/nvme0n1/graph-anns-texmex-data/gnd/idx_1000M.ivecs_array
+
+default out_degree of 7 and default num searchers of 7
+
+Used a 48 CPU, 384G memory machine.
+VIRT: 291.9g, RES:266.1g.
+Built graph in 9161 seconds.
+Recall@10: 0.2603
+
+Recall is computed single-threaded (oops, forgot to parallelize this part).
+Recall took 33.5 seconds to do 10k queries.
+
+NOTE: I was accidentally using the jemalloc version.
+
+It took a very long time for the program to close because of jemalloc deallocating.
+
+without jemalloc, 9592 seconds to build graph
+24.5 seconds to do recall
+recall@10 0.2486
+VIRT 281.3, RES 279.3
+Also took a long time to exit; wtf? The csv output is only 10k lines, so it's not flushing tons of IO or something.
