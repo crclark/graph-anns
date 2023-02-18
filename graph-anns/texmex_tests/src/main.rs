@@ -64,7 +64,7 @@ fn load_texmex_to_dense(
   subset_size: u32,
   dist_fn: &(dyn Fn(&ID, &ID) -> f32 + Sync),
   args: Args,
-) -> KNN<ID, RandomState> {
+) -> Knn<ID, RandomState> {
   let start_allocate_graph = Instant::now();
   let out_degree = args.out_degree;
   println!(
@@ -119,19 +119,20 @@ fn load_texmex_to_dense(
   // to reach 1B points. The tradeoff to faster insertion may be slower search (or at least
   // multithreaded search). Hmm. I think the benefit to insertion will far outweigh the
   // slowdown at search time, which may not be too bad.
-  let config = KNNGraphConfig {
-    capacity: subset_size,
+  let config = KnnGraphConfigBuilder::new(
+    subset_size,
     out_degree,
-    num_searchers: args.num_searchers,
+    args.num_searchers,
     dist_fn,
     build_hasher,
-    use_rrnp: args.rrnp,
-    rrnp_max_depth: args.rrnp_depth,
-    use_lgd: args.lgd,
-  };
+  )
+  .use_rrnp(args.rrnp)
+  .rrnp_max_depth(args.rrnp_depth)
+  .use_lgd(args.lgd)
+  .build();
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let mut g = KNN::new(config);
+  let mut g = Knn::new(config);
 
   // oops, this is irrelevant because we start out with the brute force
   // implementation. So this is 19 microseconds. All of the real allocation is
@@ -144,7 +145,7 @@ fn load_texmex_to_dense(
 
   for i in 0..args.early_exit_after_num_insertions.unwrap_or(subset_size) {
     if i % 100000 == 0 {
-      println!("inserting {}", i);
+      println!("inserting {i}");
       println!("elapsed: {:?}", start_inserting.elapsed());
     }
     g.insert(ID::Base(i), &mut prng);
@@ -273,7 +274,7 @@ fn main_single_threaded(args: Args) {
     &mut line_writer,
     args,
   );
-  println!("Recall@10: {}", recall);
+  println!("Recall@10: {recall}");
   pause();
 }
 
@@ -399,23 +400,24 @@ fn main_single_threaded(args: Args) {
 /// insertion more efficiently by inserting into graph i%n instead of calling
 /// a prng. The insert() function can't do that because it doesn't have access
 /// to i.
-pub struct ManyKNN<'a, ID, S: BuildHasher + Clone> {
-  pub graphs: Vec<RwLock<KNN<'a, ID, S>>>,
+pub struct ManyKnn<'a, ID, S: BuildHasher + Clone> {
+  pub graphs: Vec<RwLock<Knn<'a, ID, S>>>,
 }
 
 impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
-  ManyKNN<'_, ID, S>
+  ManyKnn<'_, ID, S>
 {
-  pub fn new(n: u32, config: KNNGraphConfig<ID, S>) -> ManyKNN<ID, S> {
-    let total_capacity = config.capacity;
+  pub fn new(n: u32, config: KnnGraphConfig<ID, S>) -> ManyKnn<ID, S> {
+    let total_capacity = config.capacity();
     let individual_capacity = total_capacity / n + total_capacity % n;
     let mut graphs = Vec::with_capacity(n as usize);
     for _ in 0..n {
-      let mut config = config.clone();
-      config.capacity = individual_capacity;
-      graphs.push(RwLock::new(KNN::new(config)));
+      let config = KnnGraphConfigBuilder::from(config.clone())
+        .capacity(individual_capacity)
+        .build();
+      graphs.push(RwLock::new(Knn::new(config)));
     }
-    ManyKNN { graphs }
+    ManyKnn { graphs }
   }
 
   pub fn debug_size_stats(&self) -> SpaceReport {
@@ -432,7 +434,7 @@ impl<
     'a,
     T: Copy + Ord + Eq + std::hash::Hash + Send + Sync,
     S: BuildHasher + Clone + Send + Sync,
-  > NN<T> for ManyKNN<'a, T, S>
+  > NN<T> for ManyKnn<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
     let i = prng.next_u32() % self.graphs.len() as u32;
@@ -481,7 +483,7 @@ fn load_texmex_to_dense_par(
   num_graphs: u32,
   dist_fn: &(dyn Fn(&ID, &ID) -> f32 + Sync),
   args: Args,
-) -> ManyKNN<ID, RandomState> {
+) -> ManyKnn<ID, RandomState> {
   let start_allocate_graph = Instant::now();
 
   let build_hasher = RandomState::new();
@@ -536,18 +538,19 @@ fn load_texmex_to_dense_par(
     subset_size as usize * mem::size_of::<Option<ID>>()
   );
 
-  let config = KNNGraphConfig {
-    capacity: subset_size,
+  let config = KnnGraphConfigBuilder::new(
+    subset_size,
     out_degree,
-    num_searchers: args.num_searchers,
+    args.num_searchers,
     dist_fn,
     build_hasher,
-    use_rrnp: args.rrnp,
-    rrnp_max_depth: args.rrnp_depth,
-    use_lgd: args.lgd,
-  };
+  )
+  .use_rrnp(args.rrnp)
+  .rrnp_max_depth(args.rrnp_depth)
+  .use_lgd(args.lgd)
+  .build();
 
-  let g = ManyKNN::new(num_graphs, config);
+  let g = ManyKnn::new(num_graphs, config);
 
   // oops, this is irrelevant because we start out with the brute force
   // implementation. So this is 19 microseconds. All of the real allocation is
@@ -606,7 +609,7 @@ fn main_parallel(args: Args) {
     &mut line_writer,
     args,
   );
-  println!("Recall@10: {}", recall);
+  println!("Recall@10: {recall}");
   pause()
 }
 
@@ -629,13 +632,13 @@ struct Args {
   output_csv: String,
   #[arg(long, default_value = "default")]
   experiment_name: String,
-  #[arg(long, default_value = "/mnt/970pro/anns/bigann_base.bvecs_array")]
+  #[arg(long, default_value = "/mnt/970_pro/anns/bigann_base.bvecs_array")]
   texmex_path: String,
   #[arg(long, default_value_t = 5_000_000)]
   subset_size: u32,
-  #[arg(long, default_value = "/mnt/970pro/anns/bigann_query.bvecs_array")]
+  #[arg(long, default_value = "/mnt/970_pro/anns/bigann_query.bvecs_array")]
   query_path: String,
-  #[arg(long, default_value = "/mnt/970pro/anns/gnd/idx_5M.ivecs_array")]
+  #[arg(long, default_value = "/mnt/970_pro/anns/gnd/idx_5M.ivecs_array")]
   gnd_path: String,
   #[arg(long)]
   early_exit_after_num_insertions: Option<u32>,
@@ -650,113 +653,3 @@ fn main() {
     main_single_threaded(args);
   }
 }
-
-// TODO: parallel version appears to use more memory than single-threaded version
-// and I am not sure why.
-// For subset_size = 5M and num_graphs = 32,
-// parallel version is: 83s to build graph, 1.9G res, 122.0 virt
-// single threaded version is: 1791s to build graph, 1.9G res, 122.0 virt
-// never mind; I guess I imagined it.
-
-// TODO: fine-grained parallel insertion? Would this be helpful in some way?
-// We could make an insert_batch() API that runs all the searches for the batch
-// in parallel, then inserts each one serially. The only benefit I can see for
-// that is that we could be parallel within a single partition of the data
-// structure, which could allow us to keep memory usage low by writing partitions
-// to disk after they have reached a certain size. However, we would still need
-// them all in memory at query time, so I don't see a big advantage to this.
-// Parallelism would also be limited by the sequential insertion, which is
-// able to be parallelized across partitions with our current approach.
-
-// TODO: NVMe works best with high queue depths. Should we expose a prefetch
-// callback to the user, which we call as soon as we know we are going to
-// call the distance function on an item?
-
-// TODO: other optimization ideas:
-// - try BTreeMap for external and internal mappings -- might be more space
-// efficient, might be faster in time, too. DONE, much slower, no memory savings.
-// - Try to find a way to avoid storing two copies of the external id for the
-// internal/external maps. Is there a bidi map that can avoid extra copies of
-// the k/v?
-// - Eliminate the temporary SetU32 in query_internal (r_nbrs). DONE, 10% speedup.
-// - Use a vec for the internal to external mapping. DONE, good speedup, 10% memory savings.
-// - Replace random selection of starting points in each query with
-// reservoir-sampled selection of starting points. Eventually this could be
-// replaced with smarter pivot selection algorithms. DONE as part of switch to vec
-// for int_to_ext mapping. Unclear if this had a performance impact outside of
-// the 10% speedup from using a vec for int_to_ext.
-// - Analyze the behavior of the algorithm itself and devise improvements and
-// novel extensions. Open questions:
-//   - Does including backpointers in the search improve search performance?
-//   - How much does distance to the best-so-far decrease on each iteration?
-//   - Do long-distance jumps (or random restarts) help performance?
-//   - How many nodes do we visit per query?
-//   - Can we learn better starting points based on our query patterns? For
-//     example, does starting at recent query points help? Or can we find
-//     frequently-visited points and use them as starting points?
-//   - Can we avoid tracking already-traversed nodes by ensuring our algorithm
-//     always moves in the direction of decreasing distance?
-//   - Does a greater number of starting points even help performance (recall@n)? Early
-//     evidence suggests the answer is no, so does reducing the number of starting points
-//     reduce query latency? Note that this may be dataset-specific -- I can imagine that
-//     having one starting point per cluster could really help performance.
-//   - Can we use the triangle inequality to reduce distance calls?
-//   - Can we find a more clever stopping condition that allows us to stop earlier?
-//   - Why does increasing out_degree improve recall@n so much, anyway? I thought
-//     it would simply affect query latency. Find the answer.
-//   - store fp16 floats. Recompute distances in cases where the precision loss
-//     was so large that two floats can't be properly compared. Or maybe even
-//     don't do that; this is approximate nearest neighbors, after all.
-
-// TODO: memory optimization. The main candidate for optimization is the edges
-// // vec. For 1B points with out_degree 7, we have:
-// Size of edges array will be 84000000000
-// If we used a custom struct with packed, it would be 63000000000
-// If we switched to Vec<(u32, f32)>, Vec<u8>, it would be 63000000000
-// If we switched to Vec<(u32, f16)>, Vec<u8>, it would be 63000000000
-// If we switched to struct of arrays, it would be 63000000000
-// If we switched to f16 stored distances, it would be 49000000000
-// If we always recomputed distances and didn't store them, it would be 35000000000
-//
-// There are performance tradeoffs for all of these: cache locality is better if
-// we keep it as-is (index, distance, crowding factor stored together). If we
-// use packed, we have the performance penalty of unaligned accesses. However,
-// we need to consider how often we actually use all of the elements of the tuples
-// we have today... maybe the cache "locality" we think we are getting is
-// actually a waste, because we don't always use all the tuple elements.
-//
-// We should also consider the performance benefit of using less memory: this
-// means we can increase out_degree, which improves recall. of course, the
-// better way to do that is to buy more RAM, so that shouldn't be an overwhelming
-// consideration.
-
-// test to make sure I understand how to share a vec of atomics between threads.
-
-// TODO: https://travisdowns.github.io/blog/2020/07/06/concurrency-costs.html
-// Read this a second time. It's great. See especially "Level 0" section.
-
-// use std::sync::atomic::AtomicU32;
-// use std::sync::Arc;
-// fn main() {
-//   let atomics = Arc::new(vec![AtomicU32::new(2), AtomicU32::new(1)]);
-
-//   let num_threads = 2;
-
-//   let mut handles = Vec::new();
-
-//   for i in 0..num_threads {
-//     let thread_num = i.clone();
-//     let thread_atomics = Arc::clone(&atomics);
-//     handles.push(thread::spawn(move || {
-//       let my_atomic = &thread_atomics[thread_num];
-//       let other_atomic = &thread_atomics[(thread_num + 1) % num_threads];
-//       let other_atomic_value = other_atomic.load(std::sync::atomic::Ordering::Relaxed);
-//       my_atomic.fetch_add(other_atomic_value, std::sync::atomic::Ordering::Relaxed)
-//     }));
-//   }
-
-//   for handle in handles {
-//     handle.join().unwrap();
-//   }
-//   println!("{:?}", atomics)
-// }

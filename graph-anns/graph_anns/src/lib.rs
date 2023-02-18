@@ -1,4 +1,7 @@
 #![feature(is_sorted)]
+#![deny(missing_docs)]
+
+//! Test. Does this appear at the top of the crate docs?
 extern crate rand;
 extern crate rand_xoshiro;
 extern crate soa_derive;
@@ -24,95 +27,235 @@ const DEFAULT_LAMBDA: u8 = 0;
 
 // TODO: many benchmarking utilities. Recall@n  metrics and so forth.
 
-// TODO: I see two possible problems in the paper:
-// 1. Nothing in the paper guarantees the connectivity of the graph.
-// 2. Intuitively, it seems like being able to jump long distances if we are in
-//    a really irrelevant part of the graph would be a good idea.
-//
-// To fix both of these problems, I have an idea. Each node has one extra edge
-// that is used normally for searching, but can't be removed by the insertion
-// algorithm. These edges, taken together, form a permutation of the nodes of
-// the graph, ensuring that we have a route passing through all the nodes. We
-// try to optimize this permutation by swapping, in order to decrease the sum
-// of the distances between successive nodes. Also, the node linked to in this
-// special edge cannot be a node that is already linked to by the normal edges.
-// We could use idle background CPU to optimize this permutation while we wait
-// for requests.
-//
-// We'd need to make this optional and benchmark carefully to verify that it
-// improves performance -- the permutation and optimization of the permutation
-// should be two separate flags that are evaluated separately. Maybe a random
-// permutation is better, because it's essentially giving each searcher the
-// option to do something like a random restart at each iteration, and random
-// restarts are a well-known trick for improving local search algorithms such
-// as this one.
-//
-// test_delete below actually hits this edge case -- the graph is split into two
-// connected components, and so a search that starts in one component can
-// never reach the other. We are doing beam search from multiple starting points
-// and that should mitigate the issue, but it doesn't guarantee anything.
-// Ideally, we would ensure that the graph is always connected.
-//
-// One way to do this would be to maintain one special edge per node that points
-// to a nearby-ish neighbor with an additional property: all of these special
-// edges together form a path that touches each node in the graph once. In other
-// words, we maintain a permutation of the nodes to ensure that we always have
-// a path through all of the nodes.
-//
-// Problems with this idea:
-// 1. We would need to optimize the path to ensure that consecutive nodes are
-//   close to one another.
-// 2. Some consecutive nodes simply won't be very close no matter how we try.
-// 3. It may have unintended cosequences on the search performance.
-// 4. Internal implementation becomes even more complicated.
-//
-// What about other solutions? We could simply trust the beam search, and
-// recommend using a higher number of searchers. However, I suspect that this
-// permutation idea may even help search performance -- see above note about
-// random restarts.
-
+/// Configuration for the graph. Use [KnnGraphConfigBuilder] to construct.
 #[derive(Clone, Copy)]
-pub struct KNNGraphConfig<'a, T, S: BuildHasher + Clone> {
+pub struct KnnGraphConfig<'a, T, S: BuildHasher + Clone> {
   /// The max number of vertices that can be inserted into the graph. Constant.
-  pub capacity: u32,
+  capacity: u32,
   /// The number of approximate nearest neighbors to store for each inserted
   /// element. This is a constant. Each graph node is guaranteed to always have
   /// exactly this out-degree. It's recommended to set this equal to the
   /// intrinsic dimensionality of the data. Lower values hinder search performance
   /// by preventing the search from moving in useful directions, higher values
   /// hinder performance by incurring needless distance calls.
-  pub out_degree: u8,
+  out_degree: u8,
   /// Number of simultaneous searchers in the beam search.
-  pub num_searchers: u32,
+  num_searchers: u32,
   /// distance function. Must satisfy the criteria of a metric:
-  /// https://en.wikipedia.org/wiki/Metric_(mathematics). Several internal
+  /// <https://en.wikipedia.org/wiki/Metric_(mathematics)>. Several internal
   /// optimizations assume the triangle inequality holds.
-  pub dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-  pub build_hasher: S,
+  dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+  /// The [std::hash::BuildHasher] to use for the internal hash table.
+  build_hasher: S,
   /// Whether to use restricted recursive neighborhood propagation. This improves
   /// search speed by about 10%, but decreases insertion throughput by about 10%.
-  pub use_rrnp: bool,
+  use_rrnp: bool,
   /// Maximum recursion depth for RRNP. 2 is a good default.
-  pub rrnp_max_depth: u32,
+  rrnp_max_depth: u32,
   /// Whether to use lazy graph diversification. This improves search speed.
   /// TODO: parametrize the graph type so that the LGD vector is never allocated/
   /// takes no memory if this is set to false.
-  pub use_lgd: bool,
+  use_lgd: bool,
+}
+
+impl<'a, T, S: BuildHasher + Clone> KnnGraphConfig<'a, T, S> {
+  /// Get the capacity of the config.
+  /// The max number of vertices that can be inserted into the graph. Constant.
+  pub fn capacity(&self) -> u32 {
+    self.capacity
+  }
+
+  /// Get the out_degree of the config.
+  /// The number of approximate nearest neighbors to store for each inserted
+  /// element. This is a constant. Each graph node is guaranteed to always have
+  /// exactly this out-degree. It's recommended to set this equal to the
+  /// intrinsic dimensionality of the data. Lower values hinder search performance
+  /// by preventing the search from moving in useful directions, higher values
+  /// hinder performance by incurring needless distance calls.
+  pub fn out_degree(&self) -> u8 {
+    self.out_degree
+  }
+
+  /// Get the num_searchers of the config.
+  /// Number of simultaneous searchers in the beam search.
+  /// This has a minor effect on search speed.
+  pub fn num_searchers(&self) -> u32 {
+    self.num_searchers
+  }
+
+  /// Get the distance function of the config.
+  /// Must satisfy the criteria of a metric:
+  /// <https://en.wikipedia.org/wiki/Metric_(mathematics)>. Several internal
+  /// optimizations assume the triangle inequality holds.
+  pub fn dist_fn(&self) -> &'a (dyn Fn(&T, &T) -> f32 + Sync) {
+    self.dist_fn
+  }
+
+  /// Get the build_hasher of the config.
+  /// This is the [std::hash::BuildHasher] to use for the internal hash table.
+  pub fn build_hasher(&self) -> S {
+    self.build_hasher.clone()
+  }
+
+  /// Get the use_rrnp of the config.
+  /// Whether to use restricted recursive neighborhood propagation. In my tests,
+  /// This improves search speed by about 10%, but decreases insertion
+  /// throughput by about 10%.
+  pub fn use_rrnp(&self) -> bool {
+    self.use_rrnp
+  }
+
+  /// Get the rrnp_max_depth of the config.
+  /// Maximum recursion depth for RRNP. 2 is a good default.
+  pub fn rrnp_max_depth(&self) -> u32 {
+    self.rrnp_max_depth
+  }
+
+  /// Get the use_lgd of the config.
+  /// Whether to use lazy graph diversification. This improves search speed.
+  pub fn use_lgd(&self) -> bool {
+    self.use_lgd
+  }
+}
+
+/// Builder for [KnnGraphConfig].
+pub struct KnnGraphConfigBuilder<'a, T, S: BuildHasher + Clone> {
+  config: KnnGraphConfig<'a, T, S>,
+}
+
+const DEFAULT_OUT_DEGREE: u8 = 5;
+const DEFAULT_NUM_SEARCHERS: u32 = 5;
+
+impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
+  /// Create a new builder with the given capacity, out_degree, num_searchers,
+  /// distance function, and hash builder.
+  /// See the documentation for [KnnGraphConfig]'s getters for more details.
+  pub fn new(
+    capacity: u32,
+    out_degree: u8,
+    num_searchers: u32,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+    build_hasher: S,
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    KnnGraphConfigBuilder {
+      config: KnnGraphConfig {
+        capacity,
+        out_degree,
+        num_searchers,
+        dist_fn,
+        build_hasher,
+        use_rrnp: true,
+        rrnp_max_depth: 2,
+        use_lgd: true,
+      },
+    }
+  }
+
+  /// Initialize the builder from a [KnnGraphConfig].
+  pub fn from(
+    config: KnnGraphConfig<'a, T, S>,
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    KnnGraphConfigBuilder { config }
+  }
+
+  /// Create a new builder with the given capacity, distance function, and hash
+  /// builder. The out_degree and num_searchers are set to the default values of
+  /// 5 and 5, respectively.
+  pub fn with_capacity_and_hasher_and_distance(
+    capacity: u32,
+    build_hasher: S,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    KnnGraphConfigBuilder {
+      config: KnnGraphConfig {
+        capacity,
+        out_degree: DEFAULT_OUT_DEGREE,
+        num_searchers: DEFAULT_NUM_SEARCHERS,
+        dist_fn,
+        build_hasher,
+        use_rrnp: true,
+        rrnp_max_depth: 2,
+        use_lgd: true,
+      },
+    }
+  }
+
+  /// Set the capacity.
+  pub fn capacity(mut self, capacity: u32) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.capacity = capacity;
+    self
+  }
+
+  ///
+  pub fn out_degree(
+    mut self,
+    out_degree: u8,
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.out_degree = out_degree;
+    self
+  }
+
+  ///
+  pub fn num_searchers(
+    mut self,
+    num_searchers: u32,
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.num_searchers = num_searchers;
+    self
+  }
+
+  ///
+  pub fn dist_fn(
+    mut self,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.dist_fn = dist_fn;
+    self
+  }
+
+  /// Enable or disable RRNP. See docs on [KnnGraphConfig] for more details.
+  pub fn use_rrnp(mut self, use_rrnp: bool) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.use_rrnp = use_rrnp;
+    self
+  }
+
+  /// Set the max depth of RRNP. See docs on [KnnGraphConfig] for more details.
+  pub fn rrnp_max_depth(
+    mut self,
+    rrnp_max_depth: u32,
+  ) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.rrnp_max_depth = rrnp_max_depth;
+    self
+  }
+
+  /// Enable or disable LGD. See docs on [KnnGraphConfig] for more details.
+  pub fn use_lgd(mut self, use_lgd: bool) -> KnnGraphConfigBuilder<'a, T, S> {
+    self.config.use_lgd = use_lgd;
+    self
+  }
+
+  /// Build the config.
+  pub fn build(self) -> KnnGraphConfig<'a, T, S> {
+    self.config
+  }
 }
 
 // NOTE: can't do a Default because we can't guess a reasonable capacity.
 // TODO: auto-resize like a Vec?
 
-// TODO: test that query can find already-inserted items
-
+/// A trait for a nearest neighbor search data structure.
 pub trait NN<T> {
   // TODO: return types with error sums, more informative delete (did it exist?)
   // etc. Eliminate all panics that are not internal errors.
 
   // TODO: more functions in this interface.
 
+  /// Insert a new element into the nearest neighbor data structure.
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R);
+  /// Delete an element from the nearest neighbor data structure.
   fn delete(&mut self, x: T);
+  /// Query the nearest neighbor data structure for the approximate
+  /// nearest neighbors of the given element.
   fn query<R: RngCore>(
     &self,
     q: &T,
@@ -121,30 +264,31 @@ pub trait NN<T> {
   ) -> SearchResults<T>;
 }
 
-pub struct BruteForceKNN<'a, T> {
+/// A nearest neighbor search data structure that uses exhaustive search.
+struct ExhaustiveKnn<'a, T> {
+  /// All inserted elements.
   pub contents: HashSet<T>,
   // TODO: made this Sync so that I could share a single closure across threads
   // when splitting up a graph into multiple pieces. Is this going to be onerous
   // to users?
+  /// Distance function.
   pub distance: &'a (dyn Fn(&T, &T) -> f32 + Sync),
 }
 
-impl<'a, T> BruteForceKNN<'a, T> {
-  pub fn new(
-    distance: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-  ) -> BruteForceKNN<'a, T> {
-    BruteForceKNN {
+impl<'a, T> ExhaustiveKnn<'a, T> {
+  fn new(distance: &'a (dyn Fn(&T, &T) -> f32 + Sync)) -> ExhaustiveKnn<'a, T> {
+    ExhaustiveKnn {
       contents: HashSet::new(),
       distance,
     }
   }
 
-  pub fn debug_size_stats(&self) -> SpaceReport {
+  fn debug_size_stats(&self) -> SpaceReport {
     SpaceReport::default()
   }
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for BruteForceKNN<'a, T> {
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
   fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) {
     self.contents.insert(x);
   }
@@ -267,9 +411,9 @@ fn convert_bruteforce_to_dense<
   T: Copy + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
 >(
-  bf: &mut BruteForceKNN<'a, T>,
-  config: KNNGraphConfig<'a, T, S>,
-) -> DenseKNNGraph<'a, T, S> {
+  bf: &mut ExhaustiveKnn<'a, T>,
+  config: KnnGraphConfig<'a, T, S>,
+) -> DenseKnnGraph<'a, T, S> {
   let ids = bf.contents.iter().collect();
   exhaustive_knn_graph(ids, config)
 }
@@ -279,61 +423,110 @@ fn convert_dense_to_bruteforce<
   T: Copy + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
 >(
-  g: &mut DenseKNNGraph<'a, T, S>,
-) -> BruteForceKNN<'a, T> {
+  g: &mut DenseKnnGraph<'a, T, S>,
+) -> ExhaustiveKnn<'a, T> {
   let mut contents = HashSet::new();
   let distance = g.config.dist_fn;
   for (ext_id, _) in g.mapping.external_to_internal_ids.drain() {
     contents.insert(ext_id);
   }
-  BruteForceKNN { contents, distance }
+  ExhaustiveKnn { contents, distance }
 }
 
-/// Switches from brute-force to approximate nearest neighbor search based on
-/// the number of inserted elements.
-pub enum KNN<'a, T, S: BuildHasher + Clone> {
-  Small {
-    g: BruteForceKNN<'a, T>,
-    config: KNNGraphConfig<'a, T, S>,
-  },
-
-  Large(DenseKNNGraph<'a, T, S>),
+/// The primary data structure for approximate nearest neighbor search exposed
+/// to the user. This is a wrapper around either a brute-force exhaustive search
+/// or a graph-based search, depending on the number of elements inserted.
+pub struct Knn<'a, T, S: BuildHasher + Clone> {
+  inner: KnnInner<'a, T, S>,
 }
 
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
-  for KNN<'a, T, S>
+  for Knn<'a, T, S>
+{
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
+    self.inner.insert(x, prng);
+  }
+
+  fn delete(&mut self, x: T) {
+    self.inner.delete(x);
+  }
+
+  fn query<R: RngCore>(
+    &self,
+    q: &T,
+    max_results: usize,
+    prng: &mut R,
+  ) -> SearchResults<T> {
+    self.inner.query(q, max_results, prng)
+  }
+}
+
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
+  Knn<'a, T, S>
+{
+  /// Initialize a new graph with the given configuration.
+  pub fn new(config: KnnGraphConfig<'a, T, S>) -> Knn<'a, T, S> {
+    Knn {
+      inner: KnnInner::new(config),
+    }
+  }
+
+  /// Panics if graph structure is internally inconsistent. Used for testing.
+  pub fn debug_consistency_check(&self) {
+    self.inner.debug_consistency_check();
+  }
+
+  /// Returns information about the length and capacity of all data structures
+  /// in the graph.
+  pub fn debug_size_stats(&self) -> SpaceReport {
+    self.inner.debug_size_stats()
+  }
+}
+
+enum KnnInner<'a, T, S: BuildHasher + Clone> {
+  Small {
+    g: ExhaustiveKnn<'a, T>,
+    config: KnnGraphConfig<'a, T, S>,
+  },
+
+  Large(DenseKnnGraph<'a, T, S>),
+}
+
+impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
+  for KnnInner<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
     match self {
-      KNN::Small { g, config } => {
+      KnnInner::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
           panic!("TODO create error type etc.");
         } else if g.contents.len()
           > max(config.out_degree as usize, config.num_searchers as usize)
         {
-          *self = KNN::Large(convert_bruteforce_to_dense(g, config.clone()));
+          *self =
+            KnnInner::Large(convert_bruteforce_to_dense(g, config.clone()));
           self.insert(x, prng);
         } else {
           g.insert(x, prng);
         }
       }
-      KNN::Large(g) => g.insert(x, prng),
+      KnnInner::Large(g) => g.insert(x, prng),
     }
   }
 
   fn delete(&mut self, x: T) {
     match self {
-      KNN::Small { g, .. } => {
+      KnnInner::Small { g, .. } => {
         g.delete(x);
       }
-      KNN::Large(g) => {
+      KnnInner::Large(g) => {
         if g.mapping.external_to_internal_ids.len()
           == g.config.out_degree as usize + 1
         {
           let config = g.config.clone();
           let mut small_g = convert_dense_to_bruteforce(g);
           small_g.delete(x);
-          *self = KNN::Small { g: small_g, config };
+          *self = KnnInner::Small { g: small_g, config };
         }
       }
     }
@@ -346,18 +539,19 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     prng: &mut R,
   ) -> SearchResults<T> {
     match self {
-      KNN::Small { g, .. } => g.query(q, max_results, prng),
-      KNN::Large(g) => g.query(q, max_results, prng),
+      KnnInner::Small { g, .. } => g.query(q, max_results, prng),
+      KnnInner::Large(g) => g.query(q, max_results, prng),
     }
   }
 }
 
 impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
-  KNN<'a, T, S>
+  KnnInner<'a, T, S>
 {
-  pub fn new(config: KNNGraphConfig<'a, T, S>) -> KNN<'a, T, S> {
-    KNN::Small {
-      g: BruteForceKNN::new(config.dist_fn),
+  /// Initialize a new graph with the given configuration.
+  pub fn new(config: KnnGraphConfig<'a, T, S>) -> KnnInner<'a, T, S> {
+    KnnInner::Small {
+      g: ExhaustiveKnn::new(config.dist_fn),
       config,
     }
   }
@@ -365,8 +559,8 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   /// Panics if graph structure is internally inconsistent. Used for testing.
   pub fn debug_consistency_check(&self) {
     match self {
-      KNN::Small { .. } => {}
-      KNN::Large(g) => {
+      KnnInner::Small { .. } => {}
+      KnnInner::Large(g) => {
         g.consistency_check();
       }
     }
@@ -376,33 +570,53 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   /// in the graph.
   pub fn debug_size_stats(&self) -> SpaceReport {
     match self {
-      KNN::Small { g, .. } => g.debug_size_stats(),
-      KNN::Large(g) => g.debug_size_stats(),
+      KnnInner::Small { g, .. } => g.debug_size_stats(),
+      KnnInner::Large(g) => g.debug_size_stats(),
     }
   }
 }
 
+/// Report on the size of the internal data structures.
+/// This is useful for debugging and testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceReport {
+  /// The number of items in the internal to external id mapping.
   pub mapping_int_ext_len: usize,
+  /// The capacity of the internal to external id mapping.
   pub mapping_int_ext_capacity: usize,
+  /// The number of items in the external to internal id mapping.
   pub mapping_ext_int_len: usize,
+  /// The capacity of the external to internal id mapping.
   pub mapping_ext_int_capacity: usize,
+  /// The number of items in the deleted id mapping.
   pub mapping_deleted_len: usize,
+  /// The capacity of the deleted id mapping.
   pub mapping_deleted_capacity: usize,
+  /// The number of items in the edges vector.
   pub edges_vec_len: usize,
+  /// The capacity of the edges vector.
   pub edges_vec_capacity: usize,
+  /// The number of items in the backpointers vector.
   pub backpointers_len: usize,
+  /// The capacity of the backpointers vector.
   pub backpointers_capacity: usize,
+  /// The total number of backpointers.
   pub backpointers_sets_sum_len: usize,
+  /// The total capacity of the backpointer sets.
   pub backpointers_sets_sum_capacity: usize,
+  /// The smallest number of backpointers for a single node.
   pub backpointers_smallest_set_len: usize,
+  /// The largest number of backpointers for a single node.
   pub backpointers_largest_set_len: usize,
+  /// The total memory used by the backpointer sets.
   backpointers_sets_mem_used: usize,
+  /// The number of reciprocal edges in the directed graph.
   pub num_reciprocated_edges: usize,
 }
 
 impl SpaceReport {
+  /// Combine the SpaceReports of two graphs to report the total space used
+  /// by both.
   pub fn merge(&self, other: &Self) -> SpaceReport {
     SpaceReport {
       mapping_int_ext_len: self.mapping_int_ext_len + other.mapping_int_ext_len,
@@ -462,8 +676,10 @@ impl Default for SpaceReport {
   }
 }
 
+/// A node in the graph that is used as the starting point for a nearest
+/// neighbor search.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct StartPoint {
+struct StartPoint {
   id: u32,
   priority: u32,
 }
@@ -480,6 +696,7 @@ impl Ord for StartPoint {
   }
 }
 
+/// Represents a directed edge in a nearest neighbor graph.
 #[derive(StructOfArray)]
 pub struct Edge {
   to: u32,
@@ -490,31 +707,32 @@ pub struct Edge {
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
-pub struct DenseKNNGraph<'a, T, S: BuildHasher + Clone> {
+pub struct DenseKnnGraph<'a, T, S: BuildHasher + Clone> {
   /// A mapping from the user's ID type, T, to our internal ids, which are u32.
   /// We use u32 internally for memory efficiency (which also makes us faster).
-  pub mapping: InternalExternalIDMapping<T, S>,
+  mapping: InternalExternalIDMapping<T, S>,
   /// n, the current number of vertices in the graph. The valid indices of the
   /// graph are given by self.mapping.internal_to_external_ids.keys().
-  pub num_vertices: u32,
+  num_vertices: u32,
   /// The underlying buffer of capacity*out_degree neighbor information.
   /// An adjacency list of (node id, distance, lambda crowding factor).
   /// Use with caution.
   /// Prefer to use get_edges to access the neighbors of a vertex.
-  pub edges: EdgeVec,
+  edges: EdgeVec,
   /// Maintains an association between vertices and the vertices that link out to
-  /// them. In other words, each backpointers[i] is the set of vertices S s.t.
+  /// them. In other words, each backpointers\[i\] is the set of vertices S s.t.
   /// for all x in S, a directed edge exists pointing from x to i.
-  pub backpointers: Vec<Vec<u32>>,
-  pub config: KNNGraphConfig<'a, T, S>,
+  backpointers: Vec<Vec<u32>>,
+  /// The configuration of the graph that was passed in at construction time.
+  config: KnnGraphConfig<'a, T, S>,
   /// The set of internal ids to start searches from. These are randomly
   /// selected using reservoir sampling as points are inserted into the graph.
   /// The size of this heap is equal to config.num_searchers.
-  pub starting_points_reservoir_sample: BinaryHeap<StartPoint>,
+  starting_points_reservoir_sample: BinaryHeap<StartPoint>,
 }
 
 impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
-  DenseKNNGraph<'a, T, S>
+  DenseKnnGraph<'a, T, S>
 {
   fn has_edge(&self, from: u32, to: u32) -> bool {
     self.get_edges(from).iter().any(|e| *e.to == to)
@@ -584,7 +802,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   // TODO: no pub, not usable
-  pub fn empty(config: KNNGraphConfig<'a, T, S>) -> DenseKNNGraph<'a, T, S> {
+  pub fn empty(config: KnnGraphConfig<'a, T, S>) -> DenseKnnGraph<'a, T, S> {
     let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
       config.capacity,
       config.build_hasher.clone(),
@@ -607,13 +825,12 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     let mut backpointers = Vec::with_capacity(config.capacity as usize);
 
     for _ in 0..config.capacity {
-      //TODO: experiment with different capacities
       backpointers.push(Vec::<u32>::new());
     }
 
     let num_vertices = 0;
 
-    DenseKNNGraph {
+    DenseKnnGraph {
       mapping,
       num_vertices,
       edges,
@@ -746,19 +963,13 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       *most_distant_edge.distance = dist;
       *most_distant_edge.crowding_factor = DEFAULT_LAMBDA;
       self.sort_edges(from);
-      self.backpointers[old as usize] = self.backpointers[old as usize]
-        .iter()
-        .filter(|&b| *b != from)
-        .map(|&b| b.clone() as u32)
-        .collect();
+      self.backpointers[old as usize].retain(|b| *b != from);
       self.backpointers[to as usize].push(from);
       return true;
     }
 
     false
   }
-
-  // TODO: can we run k-nn descent on the graph whenever we have free cycles?
 
   /// Insert a new vertex into the graph, with the given k neighbors and their
   /// distances. Does not connect other vertices to this vertex.
@@ -791,10 +1002,11 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
     self.sort_edges(u);
   }
 
+  /// Print the graph, for debugging.
   pub fn debug_print(&self) {
     println!("### Adjacency list (index, distance, lambda)");
     for i in 0..self.mapping.internal_to_external_ids.len() {
-      println!("Node {}", i);
+      println!("Node {i}");
       println!(
         "{:#?}",
         self
@@ -896,7 +1108,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 
   fn get_farthest_neighbor(
-    self: &DenseKNNGraph<'a, T, S>,
+    self: &DenseKnnGraph<'a, T, S>,
     int_id: u32,
   ) -> (u32, f32) {
     let e = self.get_edges(int_id).last().unwrap();
@@ -905,7 +1117,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
   // TODO: return an iterator to avoid allocating a new vec
   fn in_and_out_neighbors(
-    self: &DenseKNNGraph<'a, T, S>,
+    self: &DenseKnnGraph<'a, T, S>,
     int_id: u32,
   ) -> Vec<(u32, f32)> {
     let mut ret = Vec::new();
@@ -926,7 +1138,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   /// outside of the `for each r in V` loop. That should have no effect on the
   /// behavior, but it makes things more readable.
   fn rrnp(
-    self: &mut DenseKNNGraph<'a, T, S>,
+    self: &mut DenseKnnGraph<'a, T, S>,
     q: T,
     q_int: u32,
     visited_nodes: &Vec<SearchResult<T>>,
@@ -996,9 +1208,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
       BinaryHeap::new();
     let mut visited = HashSet::<u32>::new();
     let mut visited_distances: HashMap<u32, (T, f32)> = HashMap::default();
-    // TODO: all these new hash maps add significant perf overhead. Can they be
-    // replaced with new fields in SearchResult or something else that is just
-    // a field and not a hashmap?
     // TODO: disable stat tracking on insertion, make it optional elsewhere.
     // tracks the starting node of the search path for each node traversed.
     let mut largest_distance_improvement_single_hop = f32::NEG_INFINITY;
@@ -1085,7 +1294,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
       for e in r_nbrs_iter {
         let e_ext = self.mapping.int_to_ext(*e);
-        if !visited.contains(&e) {
+        if !visited.contains(e) {
           visited.insert(*e);
           let e_dist = compute_distance(q, e_ext);
           visited_distances.insert(*e, (e_ext.clone(), e_dist));
@@ -1279,7 +1488,7 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
 }
 
 impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
-  for DenseKNNGraph<'a, T, S>
+  for DenseKnnGraph<'a, T, S>
 {
   /// Inserts a new data point into the graph. The graph must not be full.
   /// Optionally performs restricted recursive neighborhood propagation and
@@ -1372,9 +1581,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
                 // already neighbors or ourself.
                 // Instead of looking for neighbors of neighbors, we simply
                 // do a search.
-                // TODO: after we have implemented the permutation idea, we are
-                // guaranteed to have only one connected component and we can drop
-                // this case.
                 let SearchResults {
                   approximate_nearest_neighbors: nearest_neighbors,
                   ..
@@ -1456,12 +1662,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   // TODO: tests for graph where n is not divisible by k, where n is very small,
   // etc.
 
-  // TODO: add summary statistics to SearchResults? min, max, mean distance of
-  // visited nodes. Or just compute them in a more complex benchmark program.
-
-  // TODO: test that nearest neighbor search actually returns nearby neighbor
-  // on small graphs.
-
   // TODO: wouldn't returning a min-dist heap be more useful?
 
   /// Perform beam search for the k nearest neighbors of a point q. Returns
@@ -1478,6 +1678,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   }
 }
 
+/// A single search result.
 #[derive(Debug, Clone, Copy)]
 pub struct SearchResult<T> {
   /// The user-provided item.
@@ -1495,7 +1696,7 @@ pub struct SearchResult<T> {
 }
 
 impl<T> SearchResult<T> {
-  pub fn new(
+  fn new(
     item: T,
     internal_id: Option<u32>,
     dist: f32,
@@ -1532,7 +1733,8 @@ impl<T> Ord for SearchResult<T> {
   }
 }
 
-///
+/// Statistics about a single search call. These are mostly used for debugging,
+/// testing, and benchmarking, but may be of interest to advanced users.
 #[derive(Debug, Clone, Copy)]
 pub struct SearchStats {
   /// Distance between query point and nearest neighbor found
@@ -1557,6 +1759,7 @@ pub struct SearchStats {
   /// The total number of hops from the starting point to the nearest neighbor
   /// that was found.
   pub nearest_neighbor_path_length: usize,
+  /// The total number of nodes visited during the search.
   pub num_visited: usize,
   // TODO
   // /// The distance from the nearest neighbor to the starting point that the searcher that found it started from.
@@ -1596,6 +1799,7 @@ impl SearchStats {
   }
 }
 
+/// The results of a search.
 #[derive(Debug, Clone)]
 pub struct SearchResults<T> {
   /// Results of the search, in order of increasing distance from the query.
@@ -1614,6 +1818,8 @@ pub struct SearchResults<T> {
 }
 
 impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
+  /// Merge two SearchResults objects. This is useful if you want to search
+  /// multiple graphs in parallel, and then merge the results.
   pub fn merge(&self, other: &Self) -> SearchResults<T> {
     let mut merged = self.clone();
     let self_nearest_set = self
@@ -1668,8 +1874,8 @@ pub fn exhaustive_knn_graph<
   S: BuildHasher + Clone,
 >(
   ids: Vec<&T>,
-  config: KNNGraphConfig<'a, T, S>,
-) -> DenseKNNGraph<'a, T, S> {
+  config: KnnGraphConfig<'a, T, S>,
+) -> DenseKnnGraph<'a, T, S> {
   let n = ids.len();
   // TODO: return Either
 
@@ -1680,7 +1886,7 @@ pub fn exhaustive_knn_graph<
     n,
   );
 
-  let mut g: DenseKNNGraph<T, S> = DenseKNNGraph::empty(config.clone());
+  let mut g: DenseKnnGraph<T, S> = DenseKnnGraph::empty(config.clone());
 
   for i_ext in ids.iter() {
     let mut knn = BinaryHeap::new();
@@ -1782,14 +1988,14 @@ mod tests {
   fn mk_config<'a, T>(
     capacity: u32,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-  ) -> KNNGraphConfig<'a, T, Nhh> {
+  ) -> KnnGraphConfig<'a, T, Nhh> {
     let out_degree = 5;
     let num_searchers = 5;
     let use_rrnp = false;
     let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
-    KNNGraphConfig::<'a, T, Nhh> {
+    KnnGraphConfig::<'a, T, Nhh> {
       capacity,
       out_degree,
       num_searchers,
@@ -1809,7 +2015,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let g: DenseKNNGraph<u32, Nhh> =
+    let g: DenseKnnGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
@@ -1828,7 +2034,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let g: DenseKNNGraph<u32, Nhh> =
+    let g: DenseKnnGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
@@ -1849,8 +2055,8 @@ mod tests {
   fn test_insert_vertex() {
     let mut config = mk_config(3, &|_x, _y| 1.0);
     config.out_degree = 2;
-    let mut g: DenseKNNGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
-      DenseKNNGraph::empty(config);
+    let mut g: DenseKnnGraph<u32, BuildHasherDefault<NoHashHasher<u32>>> =
+      DenseKnnGraph::empty(config);
     // NOTE:: g.insert_vertex() calls get_edges_mut which asserts that the
     // internal id is in the mapping. g.mapping.insert() assigns internal ids in
     // order starting from 0, so we are inserting 3 unused u32 external ids,
@@ -1880,8 +2086,8 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
-    let mut g: DenseKNNGraph<u32, Nhh> =
-      DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
+    let mut g: DenseKnnGraph<u32, Nhh> =
+      DenseKnnGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
@@ -1890,8 +2096,8 @@ mod tests {
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
-    let mut g: DenseKNNGraph<u32, Nhh> =
-      DenseKNNGraph::empty(mk_config(2, &|_x, _y| 1.0));
+    let mut g: DenseKnnGraph<u32, Nhh> =
+      DenseKnnGraph::empty(mk_config(2, &|_x, _y| 1.0));
     g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
     g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
   }
@@ -1900,7 +2106,7 @@ mod tests {
   fn test_insert_edge_if_closer() {
     let mut config = mk_config(3, &|&_x, &_y| 1.0);
     config.out_degree = 1;
-    let mut g: DenseKNNGraph<u32, Nhh> = DenseKNNGraph::empty(config);
+    let mut g: DenseKnnGraph<u32, Nhh> = DenseKnnGraph::empty(config);
 
     // see note in test_insert_vertex
     g.mapping.insert(&0);
@@ -1938,13 +2144,13 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
-    let mut g: DenseKNNGraph<u32, Nhh> = exhaustive_knn_graph(
+    let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph(
       vec![&0, &1, &2, &3, &4, &5],
       mk_config(11, dist_fn),
     );
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
-      println!("doing {}", i);
+      println!("doing {i}");
       g.insert(i, &mut prng);
     }
     g.consistency_check();
@@ -1968,7 +2174,7 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
-    let mut g: KNN<u32, Nhh> = KNN::new(mk_config(10, dist_fn));
+    let mut g: KnnInner<u32, Nhh> = KnnInner::new(mk_config(10, dist_fn));
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     g.insert(0, &mut prng);
 
@@ -1983,7 +2189,7 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let mut g: DenseKNNGraph<u32, Nhh> =
+    let mut g: DenseKnnGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.delete(3);
     g.consistency_check();
@@ -2015,7 +2221,7 @@ mod tests {
     let mut config = mk_config(30, dist_fn);
     config.out_degree = 5;
     let ids = (0u32..16).collect::<Vec<_>>();
-    let mut g: DenseKNNGraph<u32, Nhh> =
+    let mut g: DenseKnnGraph<u32, Nhh> =
       exhaustive_knn_graph(ids.iter().collect(), config);
     g.consistency_check();
     g.delete(7);
@@ -2042,7 +2248,7 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     config.use_rrnp = true;
-    let mut g: DenseKNNGraph<u32, Nhh> =
+    let mut g: DenseKnnGraph<u32, Nhh> =
       exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
@@ -2069,7 +2275,7 @@ mod tests {
     for use_rrnp in [false, true] {
       for use_lgd in [false, true] {
         let s = RandomState::new();
-        let config = KNNGraphConfig {
+        let config = KnnGraphConfig {
           capacity: 50,
           out_degree: 5,
           num_searchers: 5,
