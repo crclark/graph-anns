@@ -32,7 +32,7 @@ fn hamming_dist(x: &u32, y: &u32) -> f32 {
   result as f32
 }
 
-fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, Nhh> {
+fn mk_config<'a>(capacity: u32) -> KnnGraphConfig<'a, u32, Nhh> {
   let out_degree = 5;
   let num_searchers = 5;
   let use_rrnp = false;
@@ -40,22 +40,23 @@ fn mk_config<'a>(capacity: u32) -> KNNGraphConfig<'a, u32, Nhh> {
   let use_lgd = false;
   let dist_fn = &hamming_dist;
   let build_hasher = nohash_hasher::BuildNoHashHasher::default();
-  KNNGraphConfig::<'a, u32, Nhh> {
+  KnnGraphConfigBuilder::new(
     capacity,
     out_degree,
     num_searchers,
     dist_fn,
     build_hasher,
-    use_rrnp,
-    rrnp_max_depth,
-    use_lgd,
-  }
+  )
+  .use_rrnp(use_rrnp)
+  .rrnp_max_depth(rrnp_max_depth)
+  .use_lgd(use_lgd)
+  .build()
 }
 
 fn construct_graph<'a>(
   n: u32,
   capacity: u32,
-) -> DenseKNNGraph<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
+) -> DenseKnnGraph<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
   let ids = Vec::<u32>::from_iter(0..n);
   let g = exhaustive_knn_graph(ids.iter().collect(), mk_config(capacity));
   g
@@ -93,7 +94,7 @@ fn bench_insert_one(c: &mut Criterion) {
 fn construct_graph_approx_iterative(n: u32) {
   let mut prng = Xoshiro256StarStar::seed_from_u64(12);
   let ids = Vec::<u32>::from_iter(0..50);
-  let mut g: DenseKNNGraph<u32, Nhh> =
+  let mut g: DenseKnnGraph<u32, Nhh> =
     exhaustive_knn_graph(ids.iter().collect(), mk_config(n));
   for q in 50..n {
     g.insert(q, &mut prng);
