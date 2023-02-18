@@ -1,13 +1,14 @@
-#![feature(is_sorted)]
 #![deny(missing_docs)]
 
 //! Test. Does this appear at the top of the crate docs?
+extern crate is_sorted;
 extern crate rand;
 extern crate rand_xoshiro;
 extern crate soa_derive;
 
 use soa_derive::StructOfArray;
 
+use is_sorted::IsSorted;
 use rand::thread_rng;
 use rand::RngCore;
 use std::cmp::max;
@@ -1049,11 +1050,14 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
         }
       }
 
-      assert!(self
-        .get_edges(*i)
-        .iter()
-        .map(|e| (*e.to, *e.distance, *e.crowding_factor))
-        .is_sorted_by_key(|e| e.1));
+      assert!(IsSorted::is_sorted_by_key(
+        &mut self.get_edges(*i).iter().map(|e| (
+          *e.to,
+          *e.distance,
+          *e.crowding_factor
+        )),
+        |e| e.1
+      ));
 
       for referrer in self.backpointers[*i as usize].iter() {
         assert!(self.debug_get_neighbor_indices(*referrer).contains(i));
