@@ -1,3 +1,8 @@
+An example of running this library on the [TexMex corpus](http://corpus-texmex.irisa.fr/).
+
+To use, you first need to preprocess the texmex data so that it can be mmaped directly as a C-style array. This code removes the redundant array length at the beginning of each vector, and writes the vectors directly to stdout.
+
+```c
 /*
 Converts a file in the format specified here: http://corpus-texmex.irisa.fr/
 into a simple 2d-array of number_of_vectors*number_of_dimensions. This allows us
@@ -28,10 +33,6 @@ int main(int argc, char *argv[]) {
   size_t dimensions = strtol(argv[2], NULL, 10);
 
   size_t buffer_size = bytes_per_coord * dimensions;
-
-  // printf("bytes_per_coord = %ld\n", bytes_per_coord);
-  // printf("dimensions = %ld\n", dimensions);
-
 
   // set up our streams in binary mode
   freopen(NULL, "rb", stdin);
@@ -72,3 +73,4 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
+```
