@@ -802,8 +802,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
 
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
-  // TODO: no pub, not usable
-  pub fn empty(config: KnnGraphConfig<'a, T, S>) -> DenseKnnGraph<'a, T, S> {
+  fn empty(config: KnnGraphConfig<'a, T, S>) -> DenseKnnGraph<'a, T, S> {
     let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
       config.capacity,
       config.build_hasher.clone(),
