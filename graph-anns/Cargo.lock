@@ -877,7 +877,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "texmex_tests"
+name = "texmex_example"
 version = "0.1.0"
 dependencies = [
  "atomic_float",
