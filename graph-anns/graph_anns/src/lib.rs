@@ -6,8 +6,6 @@ extern crate rand;
 extern crate rand_xoshiro;
 extern crate soa_derive;
 
-use soa_derive::StructOfArray;
-
 use is_sorted::IsSorted;
 use rand::thread_rng;
 use rand::RngCore;
@@ -21,6 +19,9 @@ use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use std::time::Duration;
 use std::time::Instant;
+
+mod edge;
+use edge::*;
 
 const DEFAULT_LAMBDA: u8 = 0;
 
@@ -289,7 +290,7 @@ impl<'a, T> ExhaustiveKnn<'a, T> {
   }
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
+impl<'a, T: Clone + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
   fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) {
     self.contents.insert(x);
   }
@@ -309,8 +310,8 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
     let mut visited_nodes = Vec::new();
     for x in self.contents.iter() {
       let dist = (self.distance)(x, q);
-      let search_result = SearchResult::new(*x, None, dist, 0, 0);
-      visited_nodes.push(search_result);
+      let search_result = SearchResult::new(x.clone(), None, dist, 0, 0);
+      visited_nodes.push(search_result.clone());
       nearest_neighbors_max_dist_heap.push(search_result);
       if nearest_neighbors_max_dist_heap.len() >= max_results {
         nearest_neighbors_max_dist_heap.pop();
@@ -332,7 +333,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
 /// performance-critical code. In practice, doing so may be difficult, since the
 /// user's distance callback is passed external ids (the user's IDs).
 #[derive(Debug)]
-pub struct InternalExternalIDMapping<T, S: BuildHasher> {
+struct IdMapping<T, S: BuildHasher> {
   capacity: u32,
   next_int_id: u32,
   internal_to_external_ids: Vec<Option<T>>,
@@ -340,9 +341,7 @@ pub struct InternalExternalIDMapping<T, S: BuildHasher> {
   deleted: Vec<u32>,
 }
 
-impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
-  InternalExternalIDMapping<T, S>
-{
+impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher> IdMapping<T, S> {
   fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
     let mut internal_to_external_ids = Vec::with_capacity(capacity as usize);
     for _ in 0..capacity {
@@ -352,7 +351,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
       HashMap::with_capacity_and_hasher(capacity as usize, hash_builder);
 
     let deleted = Vec::<u32>::new();
-    InternalExternalIDMapping {
+    IdMapping {
       capacity,
       next_int_id: 0,
       internal_to_external_ids,
@@ -409,19 +408,23 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher>
 
 fn convert_bruteforce_to_dense<
   'a,
-  T: Copy + Eq + std::hash::Hash,
+  T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
 >(
   bf: &mut ExhaustiveKnn<'a, T>,
   config: KnnGraphConfig<'a, T, S>,
 ) -> DenseKnnGraph<'a, T, S> {
   let ids = bf.contents.iter().collect();
-  exhaustive_knn_graph(ids, config)
+  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config).inner
+  else {
+    panic!("internal error: exhaustive_knn_graph returned a small graph");
+  };
+  g
 }
 
 fn convert_dense_to_bruteforce<
   'a,
-  T: Copy + Eq + std::hash::Hash,
+  T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
 >(
   g: &mut DenseKnnGraph<'a, T, S>,
@@ -441,7 +444,7 @@ pub struct Knn<'a, T, S: BuildHasher + Clone> {
   inner: KnnInner<'a, T, S>,
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
+impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   for Knn<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
@@ -462,7 +465,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   }
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
+impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   Knn<'a, T, S>
 {
   /// Initialize a new graph with the given configuration.
@@ -493,7 +496,7 @@ enum KnnInner<'a, T, S: BuildHasher + Clone> {
   Large(DenseKnnGraph<'a, T, S>),
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
+impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   for KnnInner<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
@@ -546,7 +549,7 @@ impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
   }
 }
 
-impl<'a, T: Copy + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
+impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   KnnInner<'a, T, S>
 {
   /// Initialize a new graph with the given configuration.
@@ -697,21 +700,13 @@ impl Ord for StartPoint {
   }
 }
 
-/// Represents a directed edge in a nearest neighbor graph.
-#[derive(StructOfArray)]
-pub struct Edge {
-  to: u32,
-  distance: f32,
-  crowding_factor: u8,
-}
-
 /// A directed graph stored contiguously in memory as an adjacency list.
 /// All vertices are guaranteed to have the same out-degree.
 /// Nodes are u32s numbered from 0 to n-1.
-pub struct DenseKnnGraph<'a, T, S: BuildHasher + Clone> {
+struct DenseKnnGraph<'a, T, S: BuildHasher + Clone> {
   /// A mapping from the user's ID type, T, to our internal ids, which are u32.
   /// We use u32 internally for memory efficiency (which also makes us faster).
-  mapping: InternalExternalIDMapping<T, S>,
+  mapping: IdMapping<T, S>,
   /// n, the current number of vertices in the graph. The valid indices of the
   /// graph are given by self.mapping.internal_to_external_ids.keys().
   num_vertices: u32,
@@ -803,7 +798,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone>
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   fn empty(config: KnnGraphConfig<'a, T, S>) -> DenseKnnGraph<'a, T, S> {
-    let mapping = InternalExternalIDMapping::<T, S>::with_capacity_and_hasher(
+    let mapping = IdMapping::<T, S>::with_capacity_and_hasher(
       config.capacity,
       config.build_hasher.clone(),
     );
@@ -1871,7 +1866,7 @@ impl<T> Default for SearchResults<T> {
 /// Constructs an exact k-nn graph on the given IDs. O(n^2).
 /// `capacity` is max capacity of the returned graph (for future inserts).
 /// Must be >= n.
-pub fn exhaustive_knn_graph<
+fn exhaustive_knn_graph_internal<
   'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
@@ -1928,6 +1923,22 @@ pub fn exhaustive_knn_graph<
   }
 
   g
+}
+
+// Constructs an exact k-nn graph on the given IDs. O(n^2).
+/// `capacity` is max capacity of the returned graph (for future inserts).
+/// Must be >= n.
+pub fn exhaustive_knn_graph<
+  'a,
+  T: Clone + Eq + std::hash::Hash,
+  S: BuildHasher + Clone,
+>(
+  ids: Vec<&T>,
+  config: KnnGraphConfig<'a, T, S>,
+) -> Knn<'a, T, S> {
+  Knn {
+    inner: KnnInner::Large(exhaustive_knn_graph_internal(ids, config)),
+  }
 }
 
 #[cfg(test)]
@@ -2019,7 +2030,7 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     let g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
+      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
     assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
@@ -2038,7 +2049,7 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     let g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph(vec![&0, &1, &2, &3, &4, &5], config);
+      exhaustive_knn_graph_internal(vec![&0, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let SearchResults {
@@ -2147,7 +2158,7 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
-    let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph(
+    let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
       vec![&0, &1, &2, &3, &4, &5],
       mk_config(11, dist_fn),
     );
@@ -2193,7 +2204,7 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
+      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.delete(3);
     g.consistency_check();
   }
@@ -2225,7 +2236,7 @@ mod tests {
     config.out_degree = 5;
     let ids = (0u32..16).collect::<Vec<_>>();
     let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph(ids.iter().collect(), config);
+      exhaustive_knn_graph_internal(ids.iter().collect(), config);
     g.consistency_check();
     g.delete(7);
     g.delete(15);
@@ -2252,7 +2263,7 @@ mod tests {
     config.out_degree = 2;
     config.use_rrnp = true;
     let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph(vec![&0u32, &1, &2, &3, &4, &5], config);
+      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     g.insert(6, &mut prng);
