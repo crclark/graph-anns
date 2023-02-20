@@ -58,7 +58,9 @@ fn construct_graph<'a>(
   capacity: u32,
 ) -> Knn<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
   let ids = Vec::<u32>::from_iter(0..n);
-  let g = exhaustive_knn_graph(ids.iter().collect(), mk_config(capacity));
+  let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+  let g =
+    exhaustive_knn_graph(ids.iter().collect(), mk_config(capacity), &mut prng);
   g
 }
 
@@ -95,7 +97,7 @@ fn construct_graph_approx_iterative(n: u32) {
   let mut prng = Xoshiro256StarStar::seed_from_u64(12);
   let ids = Vec::<u32>::from_iter(0..50);
   let mut g: Knn<u32, Nhh> =
-    exhaustive_knn_graph(ids.iter().collect(), mk_config(n));
+    exhaustive_knn_graph(ids.iter().collect(), mk_config(n), &mut prng);
   for q in 50..n {
     g.insert(q, &mut prng);
   }

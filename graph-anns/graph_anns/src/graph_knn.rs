@@ -1,5 +1,4 @@
 use is_sorted::IsSorted;
-use rand::thread_rng;
 use rand::RngCore;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -1116,7 +1115,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     self.maybe_insert_starting_point(q_int, prng);
   }
 
-  fn delete(&mut self, ext_id: T) {
+  fn delete<R: RngCore>(&mut self, ext_id: T, prng: &mut R) {
     assert!(self.num_vertices + 1 > self.config.out_degree as u32);
     match self.mapping.external_to_internal_ids.get(&ext_id) {
       None => {
@@ -1127,13 +1126,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           .iter()
           .map(|e| *e.to)
           .collect::<Vec<_>>();
-        //TODO: using thread_rng is bad, but so is passing a prng into every operation.
-        // let's make it part of the config.
-        self.maybe_replace_starting_point(
-          int_id,
-          nbrs,
-          &mut rand::thread_rng(),
-        );
+        self.maybe_replace_starting_point(int_id, nbrs, prng);
         for referrer in self
           .backpointers
           .get(int_id as usize)
@@ -1265,9 +1258,11 @@ pub(crate) fn exhaustive_knn_graph_internal<
   'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
+  R: RngCore,
 >(
   ids: Vec<&T>,
   config: KnnGraphConfig<'a, T, S>,
+  prng: &mut R,
 ) -> DenseKnnGraph<'a, T, S> {
   let n = ids.len();
   // TODO: return Either
@@ -1285,7 +1280,7 @@ pub(crate) fn exhaustive_knn_graph_internal<
     let mut knn = BinaryHeap::new();
     let i = g.mapping.insert(i_ext);
     // TODO: prng in config.
-    g.maybe_insert_starting_point(i, &mut thread_rng());
+    g.maybe_insert_starting_point(i, prng);
     for j_ext in ids.iter() {
       if i_ext == j_ext {
         continue;
@@ -1406,9 +1401,13 @@ mod tests {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
     let mut config = mk_config(10, dist_fn);
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     config.out_degree = 2;
-    let g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
+    let g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
+      vec![&0u32, &1, &2, &3, &4, &5],
+      config,
+      &mut prng,
+    );
     g.consistency_check();
     assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
     assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
@@ -1511,11 +1510,12 @@ mod tests {
     let dist_fn = &|x: &u32, y: &u32| {
       sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
     };
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
       vec![&0, &1, &2, &3, &4, &5],
       mk_config(11, dist_fn),
+      &mut prng,
     );
-    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     for i in 6..11 {
       println!("doing {i}");
       g.insert(i, &mut prng);
@@ -1531,9 +1531,13 @@ mod tests {
     };
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
-    g.delete(3);
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
+      vec![&0u32, &1, &2, &3, &4, &5],
+      config,
+      &mut prng,
+    );
+    g.delete(3, &mut prng);
     g.consistency_check();
   }
 
@@ -1562,20 +1566,21 @@ mod tests {
     };
     let mut config = mk_config(30, dist_fn);
     config.out_degree = 5;
+    let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let ids = (0u32..16).collect::<Vec<_>>();
     let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph_internal(ids.iter().collect(), config);
+      exhaustive_knn_graph_internal(ids.iter().collect(), config, &mut prng);
     g.consistency_check();
-    g.delete(7);
-    g.delete(15);
-    g.delete(0);
-    g.delete(1);
-    g.delete(2);
-    g.delete(3);
-    g.delete(4);
-    g.delete(5);
-    g.delete(6);
-    g.delete(8);
+    g.delete(7, &mut prng);
+    g.delete(15, &mut prng);
+    g.delete(0, &mut prng);
+    g.delete(1, &mut prng);
+    g.delete(2, &mut prng);
+    g.delete(3, &mut prng);
+    g.delete(4, &mut prng);
+    g.delete(5, &mut prng);
+    g.delete(6, &mut prng);
+    g.delete(8, &mut prng);
     g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     g.query(&1, 2, &mut prng);
@@ -1590,10 +1595,13 @@ mod tests {
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     config.use_rrnp = true;
-    let mut g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph_internal(vec![&0u32, &1, &2, &3, &4, &5], config);
-    g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    let mut g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
+      vec![&0u32, &1, &2, &3, &4, &5],
+      config,
+      &mut prng,
+    );
+    g.consistency_check();
     g.insert(6, &mut prng);
     g.consistency_check();
   }

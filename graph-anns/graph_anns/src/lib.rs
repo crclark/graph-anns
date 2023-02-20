@@ -119,7 +119,7 @@ pub trait NN<T> {
   /// Insert a new element into the nearest neighbor data structure.
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R);
   /// Delete an element from the nearest neighbor data structure.
-  fn delete(&mut self, x: T);
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R);
   /// Query the nearest neighbor data structure for the approximate
   /// nearest neighbors of the given element.
   fn query<R: RngCore>(
@@ -159,7 +159,7 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
     self.contents.insert(x);
   }
 
-  fn delete(&mut self, x: T) {
+  fn delete<R: RngCore>(&mut self, x: T, _prng: &mut R) {
     self.contents.remove(&x);
   }
 
@@ -195,12 +195,14 @@ fn convert_bruteforce_to_dense<
   'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
+  R: RngCore,
 >(
   bf: &mut ExhaustiveKnn<'a, T>,
   config: KnnGraphConfig<'a, T, S>,
+  prng: &mut R,
 ) -> DenseKnnGraph<'a, T, S> {
   let ids = bf.contents.iter().collect();
-  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config).inner
+  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, prng).inner
   else {
     panic!("internal error: exhaustive_knn_graph returned a small graph");
   };
@@ -239,8 +241,8 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     self.inner.insert(x, prng);
   }
 
-  fn delete(&mut self, x: T) {
-    self.inner.delete(x);
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
+    self.inner.delete(x, prng);
   }
 
   fn query<R: RngCore>(
@@ -295,8 +297,11 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
         } else if g.contents.len()
           > max(config.out_degree as usize, config.num_searchers as usize)
         {
-          *self =
-            KnnInner::Large(convert_bruteforce_to_dense(g, config.clone()));
+          *self = KnnInner::Large(convert_bruteforce_to_dense(
+            g,
+            config.clone(),
+            prng,
+          ));
           self.insert(x, prng);
         } else {
           g.insert(x, prng);
@@ -306,10 +311,10 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     }
   }
 
-  fn delete(&mut self, x: T) {
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
     match self {
       KnnInner::Small { g, .. } => {
-        g.delete(x);
+        g.delete(x, prng);
       }
       KnnInner::Large(g) => {
         if g.mapping.external_to_internal_ids.len()
@@ -317,7 +322,7 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
         {
           let config = g.config.clone();
           let mut small_g = convert_dense_to_bruteforce(g);
-          small_g.delete(x);
+          small_g.delete(x, prng);
           *self = KnnInner::Small { g: small_g, config };
         }
       }
@@ -377,12 +382,14 @@ pub fn exhaustive_knn_graph<
   'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone,
+  R: RngCore,
 >(
   ids: Vec<&T>,
   config: KnnGraphConfig<'a, T, S>,
+  prng: &mut R,
 ) -> Knn<'a, T, S> {
   Knn {
-    inner: KnnInner::Large(exhaustive_knn_graph_internal(ids, config)),
+    inner: KnnInner::Large(exhaustive_knn_graph_internal(ids, config, prng)),
   }
 }
 
@@ -464,10 +471,13 @@ mod tests {
       &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
-    let g: DenseKnnGraph<u32, Nhh> =
-      exhaustive_knn_graph_internal(vec![&0, &1, &2, &3, &4, &5], config);
-    g.consistency_check();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+    let g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
+      vec![&0, &1, &2, &3, &4, &5],
+      config,
+      &mut prng,
+    );
+    g.consistency_check();
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
       ..

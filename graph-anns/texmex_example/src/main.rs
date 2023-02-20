@@ -442,10 +442,10 @@ impl<
     g.insert(x, prng);
   }
 
-  fn delete(&mut self, x: T) {
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
     for g in &self.graphs {
       let mut g = g.write().unwrap();
-      g.delete(x);
+      g.delete(x, prng);
     }
   }
 
