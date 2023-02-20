@@ -49,9 +49,10 @@ pub struct KnnGraphConfig<'a, T, S: BuildHasher + Clone> {
   pub(crate) use_rrnp: bool,
   /// Maximum recursion depth for RRNP. 2 is a good default.
   pub(crate) rrnp_max_depth: u32,
+
+  // TODO: parametrize the graph type so that the LGD vector is never allocated/
+  // takes no memory if this is set to false.
   /// Whether to use lazy graph diversification. This improves search speed.
-  /// TODO: parametrize the graph type so that the LGD vector is never allocated/
-  /// takes no memory if this is set to false.
   pub(crate) use_lgd: bool,
 }
 
@@ -123,7 +124,21 @@ pub struct KnnGraphConfigBuilder<'a, T, S: BuildHasher + Clone> {
 impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
   /// Create a new builder with the given capacity, out_degree, num_searchers,
   /// distance function, and hash builder.
-  /// See the documentation for [KnnGraphConfig]'s getters for more details.
+  /// * capacity: The max number of vertices that can be inserted into the graph.
+  /// * out_degree: The number of approximate nearest neighbors to store for each
+  /// inserted element. This is a constant. Each graph node is guaranteed to
+  /// always have exactly this out-degree. It's recommended to set this equal to
+  /// the intrinsic dimensionality of the data. Setting it lower than that
+  ///  hinder search performance by preventing the search from moving in useful
+  /// directions, setting it higher than that hinders performance by incurring
+  /// needless distance calls.
+  /// * num_searchers: Number of simultaneous searchers in the beam search.
+  ///   This has a minor effect on search speed.
+  /// * dist_fn: distance function. Must satisfy the criteria of a metric:
+  ///  <https://en.wikipedia.org/wiki/Metric_(mathematics)>. Several internal
+  /// optimizations assume the triangle inequality holds.
+  /// * build_hasher: The [std::hash::BuildHasher] to use for the internal hash
+  /// table.
   pub fn new(
     capacity: u32,
     out_degree: u8,
@@ -174,13 +189,20 @@ impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
     }
   }
 
-  /// Set the capacity.
+  /// Set the capacity, the maximum number of items that can be inserted into
+  /// the graph.
   pub fn capacity(mut self, capacity: u32) -> KnnGraphConfigBuilder<'a, T, S> {
     self.config.capacity = capacity;
     self
   }
 
-  ///
+  /// Set the out_degree, the number of approximate nearest neighbors to store
+  /// for each inserted element. This is a constant. Each graph node is
+  /// guaranteed to always have exactly this out-degree. It's recommended to set
+  /// this equal to the intrinsic dimensionality of the data. Setting it lower
+  /// than that hinder search performance by preventing the search from moving
+  /// in useful directions, setting it higher than that hinders performance by
+  /// incurring needless distance calls.
   pub fn out_degree(
     mut self,
     out_degree: u8,
@@ -189,7 +211,9 @@ impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
     self
   }
 
-  ///
+  /// Set the num_searchers, the number of simultaneous searchers in the beam
+  /// search. This has a minor effect on search speed. Try tuning this for your
+  /// use case.
   pub fn num_searchers(
     mut self,
     num_searchers: u32,
@@ -198,7 +222,9 @@ impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
     self
   }
 
-  ///
+  /// Set the distance function. Must satisfy the criteria of a metric:
+  /// <https://en.wikipedia.org/wiki/Metric_(mathematics)>. Several internal
+  /// optimizations assume the triangle inequality holds.
   pub fn dist_fn(
     mut self,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
@@ -207,13 +233,14 @@ impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
     self
   }
 
-  /// Enable or disable RRNP. See docs on [KnnGraphConfig] for more details.
+  /// Whether to use restricted recursive neighborhood propagation. This improves
+  /// search speed by about 10%, but decreases insertion throughput by about 10%.
   pub fn use_rrnp(mut self, use_rrnp: bool) -> KnnGraphConfigBuilder<'a, T, S> {
     self.config.use_rrnp = use_rrnp;
     self
   }
 
-  /// Set the max depth of RRNP. See docs on [KnnGraphConfig] for more details.
+  /// Maximum recursion depth for RRNP. 2 is a good default.
   pub fn rrnp_max_depth(
     mut self,
     rrnp_max_depth: u32,
@@ -222,7 +249,7 @@ impl<'a, T, S: BuildHasher + Clone> KnnGraphConfigBuilder<'a, T, S> {
     self
   }
 
-  /// Enable or disable LGD. See docs on [KnnGraphConfig] for more details.
+  /// Whether to use lazy graph diversification. This improves search speed.
   pub fn use_lgd(mut self, use_lgd: bool) -> KnnGraphConfigBuilder<'a, T, S> {
     self.config.use_lgd = use_lgd;
     self

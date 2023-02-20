@@ -1,6 +1,81 @@
 #![deny(missing_docs)]
 
-//! Test. Does this appear at the top of the crate docs?
+//! An implementation of the approximate nearest-neighbor search data structure
+//! and algorithms
+//! described in W. -L. Zhao, H. Wang and C. -W. Ngo, "Approximate k-NN Graph
+//! Construction: A Generic Online Approach," in IEEE Transactions on Multimedia,
+//! vol. 24, pp. 1909-1921, 2022, doi: 10.1109/TMM.2021.3073811.
+//!
+//! This library is intended to be a flexible component in a system that
+//! uses approximate nearest neighbor search. It is not a complete system
+//! on its own, and requires a bit of glue code to be useful.
+//!
+//! Interesting features include:
+//! - A generic interface for nearest neighbor search on arbitrary distance
+//! functions.
+//! - Incremental insertion and deletion of elements.
+//! - Relatively fast.
+//!
+//! To get started, use the [KnnGraphConfigBuilder] to create a new nearest
+//! neighbor search structure with [Knn::new]. For vectors of floats, you can use
+//! the ordered_float crate to ensure that your floats are not NaN and to
+//! satisfy the trait requirements of this library.
+//!
+//! Minimal example:
+//! ```
+//! extern crate graph_anns;
+//! extern crate ordered_float;
+//! extern crate rand_xoshiro;
+//!
+//! use graph_anns::{Knn, KnnGraphConfigBuilder, NN, SearchResults};
+//! use ordered_float::NotNan;
+//! use rand_xoshiro::rand_core::SeedableRng;
+//! use rand_xoshiro::Xoshiro256StarStar;
+//!
+//! use std::collections::hash_map::RandomState;
+//!
+//! let dist_fn = &|x: &Vec<NotNan<f32>>, y: &Vec<NotNan<f32>>| {
+//! let mut sum = 0.0;
+//! for i in 0..x.len() {
+//!   sum += (x[i] - y[i]).powi(2);
+//! }
+//! sum
+//! };
+//!
+//! let conf = KnnGraphConfigBuilder::new(5, 3, 1, dist_fn, Default::default())
+//! .use_rrnp(true)
+//! .rrnp_max_depth(2)
+//! .use_lgd(true)
+//! .build();
+//!
+//! let mut g: Knn<Vec<NotNan<f32>>, RandomState> = Knn::new(conf);
+//!
+//! let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+//!
+//! let example_vec = vec![
+//! NotNan::new(1f32).unwrap(),
+//! NotNan::new(2f32).unwrap(),
+//! NotNan::new(3f32).unwrap(),
+//! NotNan::new(4f32).unwrap(),
+//! ];
+//!
+//! g.insert(example_vec.clone(), &mut prng);
+//!
+//! let SearchResults {
+//! approximate_nearest_neighbors: nearest_neighbors,
+//! ..
+//! } = g.query(
+//! &vec![
+//!   NotNan::new(34f32).unwrap(),
+//!   NotNan::new(5f32).unwrap(),
+//!   NotNan::new(53f32).unwrap(),
+//!   NotNan::new(312f32).unwrap(),
+//! ],
+//! 1,
+//! &mut prng,
+//! );
+//! assert_eq!(nearest_neighbors[0].item, example_vec);
+//! ```
 extern crate is_sorted;
 extern crate rand;
 extern crate rand_xoshiro;
@@ -102,7 +177,7 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
       let search_result = SearchResult::new(x.clone(), None, dist, 0, 0);
       visited_nodes.push(search_result.clone());
       nearest_neighbors_max_dist_heap.push(search_result);
-      if nearest_neighbors_max_dist_heap.len() >= max_results {
+      if nearest_neighbors_max_dist_heap.len() > max_results {
         nearest_neighbors_max_dist_heap.pop();
       }
     }
@@ -293,9 +368,11 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 }
 
-// Constructs an exact k-nn graph on the given IDs. O(n^2).
-/// `capacity` is max capacity of the returned graph (for future inserts).
-/// Must be >= n.
+/// Constructs an exact k-nn graph on the given IDs. O(n^2). This can improve
+/// performance if you have a small number of IDs and a large number of queries,
+/// but it is not recommended for large numbers of IDs.
+/// The capacity set in your config must be greater than the length of the
+/// ids vector.
 pub fn exhaustive_knn_graph<
   'a,
   T: Clone + Eq + std::hash::Hash,
@@ -316,7 +393,7 @@ mod tests {
   use std::{collections::hash_map::RandomState, hash::BuildHasherDefault};
 
   use self::nohash_hasher::NoHashHasher;
-  use self::ordered_float::OrderedFloat;
+  use self::ordered_float::NotNan;
   use super::*;
   use rand::SeedableRng;
   use rand_xoshiro::Xoshiro256StarStar;
@@ -348,10 +425,7 @@ mod tests {
     }
   }
 
-  pub fn sq_euclidean_faster<T: PrimitiveToF32 + Copy>(
-    v1: &[T],
-    v2: &[T],
-  ) -> f32 {
+  pub fn sq_euclidean<T: PrimitiveToF32 + Copy>(v1: &[T], v2: &[T]) -> f32 {
     let mut result = 0.0;
     let n = v1.len();
     for i in 0..n {
@@ -386,9 +460,8 @@ mod tests {
   #[test]
   fn test_beam_search_fully_connected_graph() {
     let db = vec![[1.1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
-    let dist_fn = &|x: &u32, y: &u32| {
-      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
-    };
+    let dist_fn =
+      &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
     let mut config = mk_config(10, dist_fn);
     config.out_degree = 2;
     let g: DenseKnnGraph<u32, Nhh> =
@@ -423,9 +496,8 @@ mod tests {
       [21f32],
       [22f32],
     ];
-    let dist_fn = &|x: &u32, y: &u32| {
-      sq_euclidean_faster(&db[*x as usize], &db[*y as usize])
-    };
+    let dist_fn =
+      &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
     let mut g: KnnInner<u32, Nhh> = KnnInner::new(mk_config(10, dist_fn));
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     g.insert(0, &mut prng);
@@ -443,8 +515,8 @@ mod tests {
   // some kind of special identifier for the query vector.
   #[test]
   fn test_realistic_usage() {
-    let dist_fn = &|x: &Vec<OrderedFloat<f32>>, y: &Vec<OrderedFloat<f32>>| {
-      sq_euclidean_faster(
+    let dist_fn = &|x: &Vec<NotNan<f32>>, y: &Vec<NotNan<f32>>| {
+      sq_euclidean(
         &x.iter().map(|x| x.into_inner()).collect::<Vec<f32>>(),
         &y.iter().map(|x| x.into_inner()).collect::<Vec<f32>>(),
       )
@@ -463,71 +535,91 @@ mod tests {
           use_lgd,
         };
 
-        let g = exhaustive_knn_graph(
-          vec![
-            &vec![
-              OrderedFloat(1f32),
-              OrderedFloat(2f32),
-              OrderedFloat(3f32),
-              OrderedFloat(4f32),
-            ],
-            &vec![
-              OrderedFloat(2f32),
-              OrderedFloat(4f32),
-              OrderedFloat(5f32),
-              OrderedFloat(6f32),
-            ],
-            &vec![
-              OrderedFloat(3f32),
-              OrderedFloat(4f32),
-              OrderedFloat(5f32),
-              OrderedFloat(12f32),
-            ],
-            &vec![
-              OrderedFloat(23f32),
-              OrderedFloat(14f32),
-              OrderedFloat(45f32),
-              OrderedFloat(142f32),
-            ],
-            &vec![
-              OrderedFloat(37f32),
-              OrderedFloat(45f32),
-              OrderedFloat(53f32),
-              OrderedFloat(122f32),
-            ],
-            &vec![
-              OrderedFloat(13f32),
-              OrderedFloat(14f32),
-              OrderedFloat(555f32),
-              OrderedFloat(125f32),
-            ],
-            &vec![
-              OrderedFloat(13f32),
-              OrderedFloat(4f32),
-              OrderedFloat(53f32),
-              OrderedFloat(12f32),
-            ],
-            &vec![
-              OrderedFloat(33f32),
-              OrderedFloat(4f32),
-              OrderedFloat(53f32),
-              OrderedFloat(312f32),
-            ],
-          ],
-          config,
-        );
-
         let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+
+        let mut g = Knn::new(config);
+        g.insert(
+          vec![
+            NotNan::new(1f32).unwrap(),
+            NotNan::new(2f32).unwrap(),
+            NotNan::new(3f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(2f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+            NotNan::new(5f32).unwrap(),
+            NotNan::new(6f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(3f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+            NotNan::new(5f32).unwrap(),
+            NotNan::new(12f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(23f32).unwrap(),
+            NotNan::new(14f32).unwrap(),
+            NotNan::new(45f32).unwrap(),
+            NotNan::new(142f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(37f32).unwrap(),
+            NotNan::new(45f32).unwrap(),
+            NotNan::new(53f32).unwrap(),
+            NotNan::new(122f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(13f32).unwrap(),
+            NotNan::new(14f32).unwrap(),
+            NotNan::new(555f32).unwrap(),
+            NotNan::new(125f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(13f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+            NotNan::new(53f32).unwrap(),
+            NotNan::new(12f32).unwrap(),
+          ],
+          &mut prng,
+        );
+        g.insert(
+          vec![
+            NotNan::new(33f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+            NotNan::new(53f32).unwrap(),
+            NotNan::new(312f32).unwrap(),
+          ],
+          &mut prng,
+        );
 
         let SearchResults {
           approximate_nearest_neighbors: nearest_neighbors,
           ..
         } = g.query(
           &vec![
-            OrderedFloat(34f32),
-            OrderedFloat(5f32),
-            OrderedFloat(53f32),
-            OrderedFloat(312f32),
+            NotNan::new(34f32).unwrap(),
+            NotNan::new(5f32).unwrap(),
+            NotNan::new(53f32).unwrap(),
+            NotNan::new(312f32).unwrap(),
           ],
           1,
           &mut prng,
@@ -536,13 +628,13 @@ mod tests {
           nearest_neighbors
             .iter()
             .map(|x| (x.item.clone(), x.dist))
-            .collect::<Vec<(Vec<OrderedFloat<f32>>, f32)>>()[0]
+            .collect::<Vec<(Vec<NotNan<f32>>, f32)>>()[0]
             .0,
           vec![
-            OrderedFloat(33f32),
-            OrderedFloat(4f32),
-            OrderedFloat(53f32),
-            OrderedFloat(312f32),
+            NotNan::new(33f32).unwrap(),
+            NotNan::new(4f32).unwrap(),
+            NotNan::new(53f32).unwrap(),
+            NotNan::new(312f32).unwrap(),
           ]
         );
       }
