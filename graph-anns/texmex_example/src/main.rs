@@ -365,21 +365,6 @@ fn main_single_threaded(args: Args) {
 //   memory_usage_experiment(5_000_000, 7);
 // }
 
-// TODO: we need to parallelize insertion because it gets slower as more stuff
-// is inserted. Let's start by implementing parallelization here, then move
-// it into the library once we know what we are doing. It would be nice if we
-// can keep it flexible -- maybe no dependency on rayon or queues and just
-// focus on providing a helper that maintains a set of graphs behind rwlocks
-// and basic tools to merge search results. Then users can decide how to put
-// them together into a real application. We can also provide a basic helper
-// that works for most use cases.
-//
-// Step 1: merge function for search results.
-// Step 2: struct that contains a vec of rwlock<graph>
-// Step 3: use rayon parallel iterator over enum(rows_to_insert), insert
-// into i%n graph, where n is the number of graphs.
-// Step 4: search in parallel across all graphs, merge results.
-
 /// A simple wrapper around a Vec of RwLocks of graphs to provide a basic
 /// parallel insert/search interface.
 /// The capacity of each graph is set to 1/n of the total capacity in the input
