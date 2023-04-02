@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -6,16 +7,22 @@ use std::hash::BuildHasher;
 /// Ideally, we should translate to and from user ids at the edges of
 /// performance-critical code. In practice, doing so may be difficult, since the
 /// user's distance callback is passed external ids (the user's IDs).
-#[derive(Debug)]
-pub struct IdMapping<T, S: BuildHasher> {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IdMapping<T: Eq + std::hash::Hash, S: BuildHasher + Default> {
   capacity: u32,
   next_int_id: u32,
   pub internal_to_external_ids: Vec<Option<T>>,
+  #[serde(bound(
+    serialize = "HashMap<T, u32, S>: Serialize",
+    deserialize = "HashMap<T, u32, S>: Deserialize<'de>"
+  ))]
   pub external_to_internal_ids: HashMap<T, u32, S>,
   pub deleted: Vec<u32>,
 }
 
-impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher> IdMapping<T, S> {
+impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
+  IdMapping<T, S>
+{
   pub fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
     let mut internal_to_external_ids = Vec::with_capacity(capacity as usize);
     for _ in 0..capacity {
