@@ -42,13 +42,13 @@
 //! sum
 //! };
 //!
-//! let conf = KnnGraphConfigBuilder::new(5, 3, 1, dist_fn, Default::default())
+//! let conf = KnnGraphConfigBuilder::new(5, 3, 1, Default::default())
 //! .use_rrnp(true)
 //! .rrnp_max_depth(2)
 //! .use_lgd(true)
 //! .build();
 //!
-//! let mut g: Knn<Vec<NotNan<f32>>, RandomState> = Knn::new(conf);
+//! let mut g: Knn<Vec<NotNan<f32>>, RandomState> = Knn::new(conf, dist_fn);
 //!
 //! let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 //!
@@ -76,17 +76,23 @@
 //! );
 //! assert_eq!(nearest_neighbors[0].item, example_vec);
 //! ```
+extern crate bincode;
 extern crate is_sorted;
 extern crate rand;
 extern crate rand_xoshiro;
+extern crate serde;
 extern crate soa_derive;
 
 use rand::RngCore;
+use serde::Deserialize;
+use serde::Serialize;
 use std::cmp::max;
 use std::collections::binary_heap::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fs::File;
 use std::hash::BuildHasher;
+use std::io::BufWriter;
 
 mod edge;
 #[allow(unused_imports)]
@@ -131,50 +137,47 @@ pub trait NN<T> {
 }
 
 /// A nearest neighbor search data structure that uses exhaustive search.
-struct ExhaustiveKnn<'a, T> {
+#[derive(Deserialize, Serialize)]
+struct ExhaustiveKnn<T: Eq + std::hash::Hash> {
   /// All inserted elements.
   pub contents: HashSet<T>,
   // TODO: made this Sync so that I could share a single closure across threads
   // when splitting up a graph into multiple pieces. Is this going to be onerous
   // to users?
-  /// Distance function.
-  pub distance: &'a (dyn Fn(&T, &T) -> f32 + Sync),
 }
 
-impl<'a, T> ExhaustiveKnn<'a, T> {
-  fn new(distance: &'a (dyn Fn(&T, &T) -> f32 + Sync)) -> ExhaustiveKnn<'a, T> {
+impl<T: Clone + Eq + std::hash::Hash> ExhaustiveKnn<T> {
+  fn new() -> ExhaustiveKnn<T> {
     ExhaustiveKnn {
       contents: HashSet::new(),
-      distance,
     }
   }
 
   fn debug_size_stats(&self) -> SpaceReport {
     SpaceReport::default()
   }
-}
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
-  fn insert<R: RngCore>(&mut self, x: T, _prng: &mut R) {
+  fn insert(&mut self, x: T) {
     self.contents.insert(x);
   }
 
-  fn delete<R: RngCore>(&mut self, x: T, _prng: &mut R) {
+  fn delete(&mut self, x: T) {
     self.contents.remove(&x);
   }
 
-  fn query<R: RngCore>(
+  fn query(
     &self,
     q: &T,
     max_results: usize,
-    _prng: &mut R,
+    distance: &(dyn Fn(&T, &T) -> f32 + Sync),
   ) -> SearchResults<T> {
     let mut nearest_neighbors_max_dist_heap: BinaryHeap<SearchResult<T>> =
       BinaryHeap::new();
     let mut visited_nodes = Vec::new();
     for x in self.contents.iter() {
-      let dist = (self.distance)(x, q);
-      let search_result = SearchResult::new(x.clone(), None, dist, 0, 0);
+      let dist = distance(x, q);
+      let search_result: SearchResult<T> =
+        SearchResult::new(x.clone(), None, dist, 0, 0);
       visited_nodes.push(search_result.clone());
       nearest_neighbors_max_dist_heap.push(search_result);
       if nearest_neighbors_max_dist_heap.len() > max_results {
@@ -194,15 +197,16 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash> NN<T> for ExhaustiveKnn<'a, T> {
 fn convert_bruteforce_to_dense<
   'a,
   T: Clone + Eq + std::hash::Hash,
-  S: BuildHasher + Clone,
+  S: BuildHasher + Clone + Default,
   R: RngCore,
 >(
-  bf: &mut ExhaustiveKnn<'a, T>,
-  config: KnnGraphConfig<'a, T, S>,
+  bf: &mut ExhaustiveKnn<T>,
+  config: KnnGraphConfig<S>,
+  dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
-) -> DenseKnnGraph<'a, T, S> {
+) -> DenseKnnGraph<T, S> {
   let ids = bf.contents.iter().collect();
-  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, prng).inner
+  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, dist_fn, prng).inner
   else {
     panic!("internal error: exhaustive_knn_graph returned a small graph");
   };
@@ -210,18 +214,16 @@ fn convert_bruteforce_to_dense<
 }
 
 fn convert_dense_to_bruteforce<
-  'a,
   T: Clone + Eq + std::hash::Hash,
-  S: BuildHasher + Clone,
+  S: BuildHasher + Clone + Default,
 >(
-  g: &mut DenseKnnGraph<'a, T, S>,
-) -> ExhaustiveKnn<'a, T> {
+  g: &mut DenseKnnGraph<T, S>,
+) -> ExhaustiveKnn<T> {
   let mut contents = HashSet::new();
-  let distance = g.config.dist_fn;
   for (ext_id, _) in g.mapping.external_to_internal_ids.drain() {
     contents.insert(ext_id);
   }
-  ExhaustiveKnn { contents, distance }
+  ExhaustiveKnn { contents }
 }
 
 /// The primary data structure for approximate nearest neighbor search exposed
@@ -230,19 +232,77 @@ fn convert_dense_to_bruteforce<
 /// or a graph-based search, depending on the number of elements inserted. The
 /// switch to a graph-based search is triggered when at least max(out_degree,
 /// num_searchers) elements are inserted.
-pub struct Knn<'a, T, S: BuildHasher + Clone> {
-  inner: KnnInner<'a, T, S>,
+pub struct Knn<
+  'a,
+  T: Clone + Eq + std::hash::Hash,
+  S: BuildHasher + Clone + Default,
+> {
+  inner: KnnInner<T, S>,
+  dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
 }
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
-  for Knn<'a, T, S>
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash + Serialize,
+    S: BuildHasher + Clone + Default,
+  > Knn<'a, T, S>
+{
+  /// Save the graph to a file.
+  pub fn save(&self, path: &str) -> Result<(), bincode::Error> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(&file);
+    bincode::serialize_into(&mut writer, &self.inner)?;
+    Ok(())
+  }
+
+  /// Serialize the graph to a byte vector.
+  pub fn serialize(&self) -> Result<Vec<u8>, bincode::Error> {
+    bincode::serialize(&self.inner)
+  }
+
+  /// Serialize the graph to a writer.
+  pub fn serialize_into(
+    &self,
+    writer: &mut dyn std::io::Write,
+  ) -> Result<(), bincode::Error> {
+    bincode::serialize_into(writer, &self.inner)
+  }
+
+  /// Load a graph from a file.
+  pub fn load<U: Clone + Eq + std::hash::Hash + for<'de> Deserialize<'de>>(
+    path: &str,
+    dist_fn: &'a (dyn Fn(&U, &U) -> f32 + Sync),
+  ) -> Result<Knn<'a, U, S>, bincode::Error> {
+    let file = File::open(path)?;
+    let mut reader = std::io::BufReader::new(&file);
+    let inner = bincode::deserialize_from(&mut reader)?;
+    Ok(Knn { inner, dist_fn })
+  }
+
+  /// Deserialize a graph from a byte slice.
+  pub fn deserialize<
+    U: Clone + Eq + std::hash::Hash + for<'de> Deserialize<'de>,
+  >(
+    bytes: &[u8],
+    dist_fn: &'a (dyn Fn(&U, &U) -> f32 + Sync),
+  ) -> Result<Knn<'a, U, S>, bincode::Error> {
+    let inner = bincode::deserialize(bytes)?;
+    Ok(Knn { inner, dist_fn })
+  }
+}
+
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash,
+    S: BuildHasher + Clone + Default,
+  > NN<T> for Knn<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
-    self.inner.insert(x, prng);
+    self.inner.insert(x, self.dist_fn, prng);
   }
 
   fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
-    self.inner.delete(x, prng);
+    self.inner.delete(x, self.dist_fn, prng);
   }
 
   fn query<R: RngCore>(
@@ -251,17 +311,24 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     max_results: usize,
     prng: &mut R,
   ) -> SearchResults<T> {
-    self.inner.query(q, max_results, prng)
+    self.inner.query(q, max_results, self.dist_fn, prng)
   }
 }
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
-  Knn<'a, T, S>
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash,
+    S: BuildHasher + Clone + Default,
+  > Knn<'a, T, S>
 {
   /// Initialize a new graph with the given configuration.
-  pub fn new(config: KnnGraphConfig<'a, T, S>) -> Knn<'a, T, S> {
+  pub fn new(
+    config: KnnGraphConfig<S>,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+  ) -> Knn<'a, T, S> {
     Knn {
       inner: KnnInner::new(config),
+      dist_fn,
     }
   }
 
@@ -277,19 +344,37 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
   }
 }
 
-enum KnnInner<'a, T, S: BuildHasher + Clone> {
+#[derive(Deserialize, Serialize)]
+enum KnnInner<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
+{
   Small {
-    g: ExhaustiveKnn<'a, T>,
-    config: KnnGraphConfig<'a, T, S>,
+    g: ExhaustiveKnn<T>,
+    #[serde(bound(
+      serialize = "KnnGraphConfig<S>: Serialize",
+      deserialize = "KnnGraphConfig<S>: Deserialize<'de>"
+    ))]
+    config: KnnGraphConfig<S>,
   },
 
-  Large(DenseKnnGraph<'a, T, S>),
+  #[serde(bound(
+    serialize = "DenseKnnGraph<T, S>: Serialize",
+    deserialize = "DenseKnnGraph<T, S>: Deserialize<'de>"
+  ))]
+  Large(DenseKnnGraph<T, S>),
 }
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
-  for KnnInner<'a, T, S>
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash,
+    S: BuildHasher + Clone + Default,
+  > KnnInner<T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
+  fn insert<R: RngCore>(
+    &mut self,
+    x: T,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+    prng: &mut R,
+  ) {
     match self {
       KnnInner::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
@@ -300,21 +385,28 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
           *self = KnnInner::Large(convert_bruteforce_to_dense(
             g,
             config.clone(),
+            #[allow(clippy::clone_double_ref)]
+            dist_fn.clone(),
             prng,
           ));
-          self.insert(x, prng);
+          self.insert(x, dist_fn, prng);
         } else {
-          g.insert(x, prng);
+          g.insert(x);
         }
       }
-      KnnInner::Large(g) => g.insert(x, prng),
+      KnnInner::Large(g) => g.insert(x, dist_fn, prng),
     }
   }
 
-  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
+  fn delete<R: RngCore>(
+    &mut self,
+    x: T,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
+    prng: &mut R,
+  ) {
     match self {
       KnnInner::Small { g, .. } => {
-        g.delete(x, prng);
+        g.delete(x);
       }
       KnnInner::Large(g) => {
         if g.mapping.external_to_internal_ids.len()
@@ -322,8 +414,10 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
         {
           let config = g.config.clone();
           let mut small_g = convert_dense_to_bruteforce(g);
-          small_g.delete(x, prng);
+          small_g.delete(x);
           *self = KnnInner::Small { g: small_g, config };
+        } else {
+          g.delete(x, dist_fn, prng);
         }
       }
     }
@@ -333,22 +427,23 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone> NN<T>
     &self,
     q: &T,
     max_results: usize,
+    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
     prng: &mut R,
   ) -> SearchResults<T> {
     match self {
-      KnnInner::Small { g, .. } => g.query(q, max_results, prng),
-      KnnInner::Large(g) => g.query(q, max_results, prng),
+      KnnInner::Small { g, .. } => g.query(q, max_results, dist_fn),
+      KnnInner::Large(g) => g.query(q, max_results, dist_fn, prng),
     }
   }
 }
 
-impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
-  KnnInner<'a, T, S>
+impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
+  KnnInner<T, S>
 {
   /// Initialize a new graph with the given configuration.
-  pub fn new(config: KnnGraphConfig<'a, T, S>) -> KnnInner<'a, T, S> {
+  pub fn new(config: KnnGraphConfig<S>) -> KnnInner<T, S> {
     KnnInner::Small {
-      g: ExhaustiveKnn::new(config.dist_fn),
+      g: ExhaustiveKnn::new(),
       config,
     }
   }
@@ -381,15 +476,19 @@ impl<'a, T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone>
 pub fn exhaustive_knn_graph<
   'a,
   T: Clone + Eq + std::hash::Hash,
-  S: BuildHasher + Clone,
+  S: BuildHasher + Clone + Default,
   R: RngCore,
 >(
   ids: Vec<&T>,
-  config: KnnGraphConfig<'a, T, S>,
+  config: KnnGraphConfig<S>,
+  dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
 ) -> Knn<'a, T, S> {
   Knn {
-    inner: KnnInner::Large(exhaustive_knn_graph_internal(ids, config, prng)),
+    inner: KnnInner::Large(exhaustive_knn_graph_internal(
+      ids, config, dist_fn, prng,
+    )),
+    dist_fn,
   }
 }
 
@@ -442,21 +541,17 @@ mod tests {
     result
   }
 
-  fn mk_config<'a, T>(
-    capacity: u32,
-    dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
-  ) -> KnnGraphConfig<'a, T, Nhh> {
+  fn mk_config(capacity: u32) -> KnnGraphConfig<Nhh> {
     let out_degree = 5;
     let num_searchers = 5;
     let use_rrnp = false;
     let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
-    KnnGraphConfig::<'a, T, Nhh> {
+    KnnGraphConfig::<Nhh> {
       capacity,
       out_degree,
       num_searchers,
-      dist_fn,
       build_hasher,
       use_rrnp,
       rrnp_max_depth,
@@ -469,19 +564,20 @@ mod tests {
     let db = vec![[1.1f32], [2f32], [3f32], [10f32], [11f32], [12f32]];
     let dist_fn =
       &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
-    let mut config = mk_config(10, dist_fn);
+    let mut config = mk_config(10);
     config.out_degree = 2;
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
     let g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
       vec![&0, &1, &2, &3, &4, &5],
       config,
+      dist_fn,
       &mut prng,
     );
     g.consistency_check();
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
       ..
-    } = g.query(&1, 2, &mut prng);
+    } = g.query(&1, 2, dist_fn, &mut prng);
     assert_eq!(
       nearest_neighbors
         .iter()
@@ -508,9 +604,9 @@ mod tests {
     ];
     let dist_fn =
       &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
-    let mut g: KnnInner<u32, Nhh> = KnnInner::new(mk_config(10, dist_fn));
+    let mut g: KnnInner<u32, Nhh> = KnnInner::new(mk_config(10));
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-    g.insert(0, &mut prng);
+    g.insert(0, dist_fn, &mut prng);
 
     g.debug_consistency_check();
   }
@@ -538,7 +634,6 @@ mod tests {
           capacity: 50,
           out_degree: 5,
           num_searchers: 5,
-          dist_fn,
           build_hasher: s,
           use_rrnp,
           rrnp_max_depth: 2,
@@ -547,7 +642,7 @@ mod tests {
 
         let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 
-        let mut g = Knn::new(config);
+        let mut g = Knn::new(config, dist_fn);
         g.insert(
           vec![
             NotNan::new(1f32).unwrap(),
