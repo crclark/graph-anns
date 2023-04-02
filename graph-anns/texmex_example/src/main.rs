@@ -123,7 +123,6 @@ fn load_texmex_to_dense(
     subset_size,
     out_degree,
     args.num_searchers,
-    dist_fn,
     build_hasher,
   )
   .use_rrnp(args.rrnp)
@@ -132,7 +131,7 @@ fn load_texmex_to_dense(
   .build();
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let mut g = Knn::new(config);
+  let mut g = Knn::new(config, dist_fn);
 
   // oops, this is irrelevant because we start out with the brute force
   // implementation. So this is 19 microseconds. All of the real allocation is
@@ -385,14 +384,22 @@ fn main_single_threaded(args: Args) {
 /// insertion more efficiently by inserting into graph i%n instead of calling
 /// a prng. The insert() function can't do that because it doesn't have access
 /// to i.
-pub struct ManyKnn<'a, ID, S: BuildHasher + Clone> {
+pub struct ManyKnn<
+  'a,
+  ID: Eq + std::hash::Hash + Clone,
+  S: BuildHasher + Clone + Default,
+> {
   pub graphs: Vec<RwLock<Knn<'a, ID, S>>>,
 }
 
-impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
-  ManyKnn<'_, ID, S>
+impl<'a, ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone + Default>
+  ManyKnn<'a, ID, S>
 {
-  pub fn new(n: u32, config: KnnGraphConfig<ID, S>) -> ManyKnn<ID, S> {
+  pub fn new(
+    n: u32,
+    config: KnnGraphConfig<S>,
+    dist_fn: &'a (dyn Fn(&ID, &ID) -> f32 + Sync),
+  ) -> ManyKnn<'a, ID, S> {
     let total_capacity = config.capacity();
     let individual_capacity = total_capacity / n + total_capacity % n;
     let mut graphs = Vec::with_capacity(n as usize);
@@ -400,7 +407,7 @@ impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
       let config = KnnGraphConfigBuilder::from(config.clone())
         .capacity(individual_capacity)
         .build();
-      graphs.push(RwLock::new(Knn::new(config)));
+      graphs.push(RwLock::new(Knn::new(config, dist_fn)));
     }
     ManyKnn { graphs }
   }
@@ -418,7 +425,7 @@ impl<ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone>
 impl<
     'a,
     T: Copy + Ord + Eq + std::hash::Hash + Send + Sync,
-    S: BuildHasher + Clone + Send + Sync,
+    S: BuildHasher + Clone + Send + Sync + Default,
   > NN<T> for ManyKnn<'a, T, S>
 {
   fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
@@ -527,7 +534,6 @@ fn load_texmex_to_dense_par(
     subset_size,
     out_degree,
     args.num_searchers,
-    dist_fn,
     build_hasher,
   )
   .use_rrnp(args.rrnp)
@@ -535,7 +541,7 @@ fn load_texmex_to_dense_par(
   .use_lgd(args.lgd)
   .build();
 
-  let g = ManyKnn::new(num_graphs, config);
+  let g = ManyKnn::new(num_graphs, config, dist_fn);
 
   // oops, this is irrelevant because we start out with the brute force
   // implementation. So this is 19 microseconds. All of the real allocation is
