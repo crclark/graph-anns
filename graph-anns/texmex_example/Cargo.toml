@@ -15,6 +15,7 @@ rayon = "1.5.1" #TODO: remove?
 tinyset = "0.4.2"
 indicatif = {version = "*", features = ["rayon"]}
 clap = { version = "4.0.32", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 
 # TODO: doesn't seem to work.
 # use
