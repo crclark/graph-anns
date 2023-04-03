@@ -895,6 +895,7 @@ dependencies = [
  "rand_core",
  "rand_xoshiro",
  "rayon",
+ "serde",
  "tinyset",
 ]
 

@@ -1,4 +1,5 @@
 use nix::sys::mman::{mmap, MapFlags, ProtFlags};
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs::File;
 use std::os::unix::io::IntoRawFd;
@@ -99,7 +100,18 @@ pub fn sq_euclidean_iter(v1: &[u8], v2: &[u8]) -> f32 {
 /// refer to them by these small IDs. A vector can occur in either the base_vecs
 /// or the query_vecs, but not both. The ID is the index into the appropriate
 /// Vecs struct.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+  Clone,
+  Copy,
+  Debug,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Hash,
+  Serialize,
+  Deserialize,
+)]
 pub enum ID {
   Base(u32),
   Query(u32),

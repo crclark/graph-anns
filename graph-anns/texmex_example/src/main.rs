@@ -11,6 +11,7 @@ extern crate rand;
 extern crate rand_core;
 extern crate rand_xoshiro;
 extern crate rayon;
+extern crate serde;
 extern crate tinyset;
 
 use clap::Parser;
@@ -19,9 +20,10 @@ use indicatif::{ParallelProgressIterator, ProgressStyle};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::RandomState;
 use std::fs::{File, OpenOptions};
-use std::hash::BuildHasher;
+use std::hash::{BuildHasher, Hash};
 use std::io::{prelude::*, LineWriter};
 use std::path::Path;
 use std::sync::RwLock;
@@ -259,7 +261,15 @@ fn main_single_threaded(args: Args) {
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
-  let g = load_texmex_to_dense(subset_size, &dist_fn, args.clone());
+  let g = if let Some(fp) = args.clone().existing_graph {
+    println!("Loading graph from {}", fp);
+    let start_loading = Instant::now();
+    let g = Knn::<ID, RandomState>::load(&fp, &dist_fn).unwrap();
+    println!("Finished loading graph in {:?}", start_loading.elapsed());
+    g
+  } else {
+    load_texmex_to_dense(subset_size, &dist_fn, args.clone())
+  };
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let mut line_writer = open_csv(args.clone());
@@ -271,9 +281,15 @@ fn main_single_threaded(args: Args) {
     10,
     &mut prng,
     &mut line_writer,
-    args,
+    args.clone(),
   );
   println!("Recall@10: {recall}");
+  if let Some(fp) = args.save_graph_to {
+    println!("Saving graph to {}", fp);
+    let start_saving = Instant::now();
+    g.save(&fp).unwrap();
+    println!("Finished saving graph in {:?}", start_saving.elapsed());
+  }
   pause();
 }
 
@@ -392,8 +408,11 @@ pub struct ManyKnn<
   pub graphs: Vec<RwLock<Knn<'a, ID, S>>>,
 }
 
-impl<'a, ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone + Default>
-  ManyKnn<'a, ID, S>
+impl<
+    'a,
+    ID: Copy + Ord + std::hash::Hash + Serialize,
+    S: BuildHasher + Clone + Default,
+  > ManyKnn<'a, ID, S>
 {
   pub fn new(
     n: u32,
@@ -419,6 +438,36 @@ impl<'a, ID: Copy + Ord + std::hash::Hash, S: BuildHasher + Clone + Default>
       .map(|g| g.read().unwrap().debug_size_stats())
       .reduce(|acc, e| acc.merge(&e))
       .unwrap()
+  }
+
+  pub fn save(&self, path: &str) {
+    for (i, g) in &mut self.graphs.iter().enumerate() {
+      let i_path = format!("{}_{}", path, i);
+      let g = g.read().unwrap();
+      g.save(&i_path).unwrap();
+    }
+  }
+
+  pub fn load<
+    U: Serialize
+      + Clone
+      + Ord
+      + PartialOrd
+      + Eq
+      + Hash
+      + for<'de> Deserialize<'de>,
+  >(
+    path: &str,
+    n: u32,
+    dist_fn: &'a (dyn Fn(&U, &U) -> f32 + Sync),
+  ) -> ManyKnn<'a, U, S> {
+    let mut graphs = Vec::new();
+    for i in 0..n {
+      let i_path = format!("{}_{}", path, i);
+      let g = Knn::<U, S>::load(&i_path, dist_fn).unwrap();
+      graphs.push(RwLock::new(g));
+    }
+    ManyKnn { graphs }
   }
 }
 
@@ -586,8 +635,15 @@ fn main_parallel(args: Args) {
   let ground_truth = texmex::Vecs::<i32>::new(gnd_path, 1000).unwrap();
 
   let dist_fn = make_dist_fn(base_vecs, query_vecs);
-  let g =
-    load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn, args.clone());
+  let g = if let Some(fp) = args.clone().existing_graph {
+    println!("Loading graph from {}", fp);
+    let start_load = Instant::now();
+    let g = ManyKnn::<ID, RandomState>::load(&fp, num_graphs, &dist_fn);
+    println!("Loaded graph in {:?}", start_load.elapsed());
+    g
+  } else {
+    load_texmex_to_dense_par(subset_size, num_graphs, &dist_fn, args.clone())
+  };
 
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let mut line_writer = open_csv(args.clone());
@@ -598,9 +654,15 @@ fn main_parallel(args: Args) {
     10,
     &mut prng,
     &mut line_writer,
-    args,
+    args.clone(),
   );
   println!("Recall@10: {recall}");
+  if let Some(fp) = args.save_graph_to {
+    let start_saving = Instant::now();
+    println!("Saving graph to {}", fp);
+    g.save(&fp);
+    println!("Saved graph in {:?}", start_saving.elapsed());
+  }
   pause()
 }
 
@@ -633,6 +695,10 @@ struct Args {
   gnd_path: String,
   #[arg(long)]
   early_exit_after_num_insertions: Option<u32>,
+  #[arg(long)]
+  existing_graph: Option<String>,
+  #[arg(long)]
+  save_graph_to: Option<String>,
 }
 
 fn main() {
