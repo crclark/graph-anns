@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 extern crate criterion;
 use std::hash::BuildHasherDefault;
 use std::iter::FromIterator;
@@ -52,13 +54,13 @@ fn construct_graph<'a>(
 ) -> Knn<'a, u32, nohash_hasher::BuildNoHashHasher<u32>> {
   let ids = Vec::<u32>::from_iter(0..n);
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-  let g = exhaustive_knn_graph(
+  exhaustive_knn_graph(
     ids.iter().collect(),
     mk_config(capacity),
     &hamming_dist,
     &mut prng,
-  );
-  g
+  )
+  .unwrap()
 }
 
 fn bench_construct_exhaustive_graph(c: &mut Criterion) {
@@ -98,9 +100,10 @@ fn construct_graph_approx_iterative(n: u32) {
     mk_config(n),
     &hamming_dist,
     &mut prng,
-  );
+  )
+  .unwrap();
   for q in 50..n {
-    g.insert(q, &mut prng);
+    g.insert(q, &mut prng).unwrap();
   }
 }
 

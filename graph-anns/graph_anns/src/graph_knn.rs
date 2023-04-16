@@ -18,6 +18,8 @@ use id_mapping::*;
 
 use space_report::*;
 
+use error::*;
+
 const DEFAULT_LAMBDA: u8 = 0;
 const DEFAULT_NUM_SEARCHERS: u32 = 5;
 const DEFAULT_OUT_DEGREE: u8 = 5;
@@ -318,28 +320,28 @@ pub(crate) struct DenseKnnGraph<
 impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   DenseKnnGraph<T, S>
 {
-  fn has_edge(&self, from: u32, to: u32) -> bool {
-    self.get_edges(from).iter().any(|e| *e.to == to)
+  fn has_edge(&self, from: u32, to: u32) -> Result<bool, Error> {
+    Ok(self.get_edges(from)?.iter().any(|e| *e.to == to))
   }
 
-  fn count_reciprocated_edges(&self) -> usize {
+  fn count_reciprocated_edges(&self) -> Result<usize, Error> {
     let mut count = 0;
     for (i, v) in self.mapping.internal_to_external_ids.iter().enumerate() {
       if v.is_some() {
-        for e in self.get_edges(i as u32) {
-          if self.has_edge(*e.to, i as u32) {
+        for e in self.get_edges(i as u32)? {
+          if self.has_edge(*e.to, i as u32)? {
             count += 1;
           }
         }
       }
     }
-    count
+    Ok(count)
   }
 
   /// Returns information about the length and capacity of all data structures
   /// in the graph.
-  pub fn debug_size_stats(&self) -> SpaceReport {
-    SpaceReport {
+  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
+    Ok(SpaceReport {
       mapping_int_ext_len: self.mapping.internal_to_external_ids.len(),
       mapping_int_ext_capacity: self
         .mapping
@@ -379,8 +381,8 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         .map(|s| s.len())
         .max()
         .unwrap_or(0),
-      num_reciprocated_edges: self.count_reciprocated_edges(),
-    }
+      num_reciprocated_edges: self.count_reciprocated_edges()?,
+    })
   }
 
   /// Allocates a graph of the specified size and out_degree, but
@@ -425,45 +427,57 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
   }
 
-  /// Get the neighbors of u and their distances. Panics if index
+  /// Get the neighbors of u and their distances. Errors if index
   /// >= capacity or does not exist.
-  pub fn get_edges(&self, index: u32) -> EdgeSlice {
-    assert!(
-      index < self.config.capacity,
-      "index {} out of bounds",
-      index
-    );
-    assert!(
-      (index as usize) < self.mapping.internal_to_external_ids.len(),
-      "index {} does not exist in internal ids",
-      index
-    );
+  pub fn get_edges(&self, index: u32) -> Result<EdgeSlice, Error> {
+    if index >= self.config.capacity {
+      return Err(Error::InternalError(format!(
+        "index {} does not exist in internal ids",
+        index
+      )));
+    };
+    if (index as usize) >= self.mapping.internal_to_external_ids.len() {
+      return Err(Error::InternalError(format!(
+        "index {} does not exist in internal ids",
+        index
+      )));
+    };
 
     let i = index * self.config.out_degree as u32;
     let j = i + self.config.out_degree as u32;
-    self.edges.slice(i as usize..j as usize)
+    Ok(self.edges.slice(i as usize..j as usize))
   }
 
-  pub(crate) fn debug_get_neighbor_indices(&self, index: u32) -> Vec<u32> {
-    self
-      .get_edges(index)
-      .iter()
-      .map(|e| *e.to)
-      .collect::<Vec<_>>()
+  pub(crate) fn debug_get_neighbor_indices(
+    &self,
+    index: u32,
+  ) -> Result<Vec<u32>, Error> {
+    Ok(
+      self
+        .get_edges(index)?
+        .iter()
+        .map(|e| *e.to)
+        .collect::<Vec<_>>(),
+    )
   }
 
-  /// Get the neighbors of u and their distances. Panics if index
+  /// Get the neighbors of u and their distances. Errors if index
   /// >= capacity or does not exist.
-  fn get_edges_mut(&mut self, index: u32) -> EdgeSliceMut {
-    assert!(index < self.config.capacity);
+  fn get_edges_mut(&mut self, index: u32) -> Result<EdgeSliceMut, Error> {
+    if index >= self.config.capacity {
+      return Err(Error::InternalError(format!(
+        "index {} does not exist in internal ids",
+        index
+      )));
+    };
 
     let i = index * self.config.out_degree as u32;
     let j = i + self.config.out_degree as u32;
-    self.edges.slice_mut(i as usize..j as usize)
+    Ok(self.edges.slice_mut(i as usize..j as usize))
   }
 
-  fn sort_edges(&mut self, index: u32) {
-    let mut edges = self.get_edges_mut(index);
+  fn sort_edges(&mut self, index: u32) -> Result<(), Error> {
+    let mut edges = self.get_edges_mut(index)?;
     //TODO: allocating a new vec and edges is absolutely horrible for performance.
     // Implement sort manually
     // if necessary, but try to find a library that has a generic enough sort
@@ -482,28 +496,35 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     });
 
     for (i, edge) in tmp_edges_vec.iter().enumerate() {
-      let e = edges.get_mut(i).unwrap();
+      let e = edges.get_mut(i).ok_or(Error::InternalError(
+        "Failed to get edge in sort_edges".to_string(),
+      ))?;
       *e.to = edge.to;
       *e.distance = edge.distance;
       *e.crowding_factor = edge.crowding_factor;
     }
+
+    Ok(())
   }
 
-  /// Get distance in terms of two internal ids. Panics if internal ids do not
-  /// exist in the mapping.
+  /// Get distance in terms of two internal ids.
   fn dist_int(
     &self,
     int_id1: u32,
     int_id2: u32,
     dist_fn: &dyn Fn(&T, &T) -> f32,
-  ) -> f32 {
+  ) -> Result<f32, Error> {
     let ext_id1 = self.mapping.internal_to_external_ids[int_id1 as usize]
       .as_ref()
-      .unwrap();
+      .ok_or(Error::InternalError(
+        "Failed to get external id in dist_int".to_string(),
+      ))?;
     let ext_id2 = self.mapping.internal_to_external_ids[int_id2 as usize]
       .as_ref()
-      .unwrap();
-    dist_fn(ext_id1, ext_id2)
+      .ok_or(Error::InternalError(
+        "Failed to get external id in dist_int".to_string(),
+      ))?;
+    Ok(dist_fn(ext_id1, ext_id2))
   }
 
   /// Replace the edge (u,v) with a new edge (u,w)
@@ -514,8 +535,8 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     v: u32,
     w: u32,
     u_w_dist: f32,
-  ) {
-    let mut u_edges = self.get_edges_mut(u);
+  ) -> Result<(), Error> {
+    let mut u_edges = self.get_edges_mut(u)?;
     for EdgeRefMut {
       to,
       distance,
@@ -531,7 +552,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     // TODO: the list is all sorted except for the new element; we could optimize
     // this.
-    self.sort_edges(u);
+    self.sort_edges(u)
   }
 
   /// Creates an edge from `from` to `to` if the distance `dist` between them is
@@ -541,44 +562,59 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   /// `to` must have already been added to the graph by insert_vertex etc.
   ///
   /// Returns `true` if the new edge was added.
-  fn insert_edge_if_closer(&mut self, from: u32, to: u32, dist: f32) -> bool {
-    let mut edges = self.get_edges_mut(from);
-    let most_distant_edge = edges.last_mut().unwrap();
+  fn insert_edge_if_closer(
+    &mut self,
+    from: u32,
+    to: u32,
+    dist: f32,
+  ) -> Result<bool, Error> {
+    let mut edges = self.get_edges_mut(from)?;
+    let most_distant_edge = edges.last_mut().ok_or(Error::InternalError(
+      "Failed to get last edge in insert_edge_if_closer".to_string(),
+    ))?;
 
     if dist < *most_distant_edge.distance {
       let old = *most_distant_edge.to;
       *most_distant_edge.to = to;
       *most_distant_edge.distance = dist;
       *most_distant_edge.crowding_factor = DEFAULT_LAMBDA;
-      self.sort_edges(from);
+      self.sort_edges(from)?;
       self.backpointers[old as usize].retain(|b| *b != from);
       self.backpointers[to as usize].push(from);
-      return true;
+      return Ok(true);
     }
 
-    false
+    Ok(false)
   }
 
   /// Insert a new vertex into the graph, with the given k neighbors and their
   /// distances. Does not connect other vertices to this vertex.
-  /// Panics if the graph is already full (num_vertices == capacity).
+  /// Throws if the graph is already full (num_vertices == capacity).
   /// nbrs and dists must be equal to the out_degree of the graph.
-  fn insert_vertex(&mut self, u: u32, nbrs: Vec<u32>, dists: Vec<f32>) {
-    //TODO: replace all asserts with Either return values
-    assert!(self.num_vertices < self.config.capacity);
+  fn insert_vertex(
+    &mut self,
+    u: u32,
+    nbrs: Vec<u32>,
+    dists: Vec<f32>,
+  ) -> Result<(), Error> {
+    if self.num_vertices >= self.config.capacity {
+      return Err(Error::CapacityExceeded);
+    }
 
     let od = self.config.out_degree as usize;
-    assert!(
-      nbrs.len() == od && dists.len() == od,
-      "nbrs.len() {}, out_degree {} dists.len() {}",
-      nbrs.len(),
-      od,
-      dists.len()
-    );
+
+    if !(nbrs.len() == od && dists.len() == od) {
+      return Err(Error::InternalError(
+        "nbrs and dists must be equal to the out_degree of the graph"
+          .to_string(),
+      ));
+    }
 
     for ((edge_ix, nbr), dist) in nbrs.iter().enumerate().zip(dists) {
-      let mut u_out_edges = self.get_edges_mut(u);
-      let edge = u_out_edges.get_mut(edge_ix).unwrap();
+      let mut u_out_edges = self.get_edges_mut(u)?;
+      let edge = u_out_edges.get_mut(edge_ix).ok_or(Error::InternalError(
+        "Failed to get edge in insert_vertex".to_string(),
+      ))?;
       *edge.to = *nbr;
       *edge.distance = dist;
       *edge.crowding_factor = DEFAULT_LAMBDA;
@@ -587,7 +623,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
 
     self.num_vertices += 1;
-    self.sort_edges(u);
+    self.sort_edges(u)
   }
 
   /// Print the graph, for debugging.
@@ -611,55 +647,65 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
   }
 
-  /// Panics if graph is internally inconsistent.
-  pub fn consistency_check(&self) {
+  /// Returns error result if graph is internally inconsistent.
+  pub fn consistency_check(&self) -> Result<(), Error> {
     if self.edges.len()
       != self.config.capacity as usize * self.config.out_degree as usize
     {
-      panic!(
+      return Err(Error::InternalError(format!(
         "edges.len() is not equal to capacity * out_degree. {} != {} * {}",
         self.edges.len(),
         self.config.capacity,
         self.config.out_degree
-      );
+      )));
     }
 
     for i in self.mapping.external_to_internal_ids.values() {
-      for e in self.get_edges(*i).iter() {
+      for e in self.get_edges(*i)?.iter() {
         if *e.to == (*i) {
-          panic!("Self loop at node {}", i);
+          return Err(Error::InternalError(format!("Self loop at node {}", i)));
         }
         let nbr_backptrs = &self.backpointers[*e.to as usize];
         if !nbr_backptrs.contains(i) {
-          panic!(
+          return Err(Error::InternalError(format!(
             "Vertex {} links to {} but {}'s backpointers don't include {}!",
             i, *e.to, *e.to, i
-          );
+          )));
         }
       }
 
-      assert!(IsSorted::is_sorted_by_key(
-        &mut self.get_edges(*i).iter().map(|e| (
-          *e.to,
-          *e.distance,
-          *e.crowding_factor
-        )),
-        |e| e.1
-      ));
+      if !(IsSorted::is_sorted_by_key(
+        &mut self
+          .get_edges(*i)?
+          .iter()
+          .map(|e| (*e.to, *e.distance, *e.crowding_factor)),
+        |e| e.1,
+      )) {
+        return Err(Error::InternalError(format!(
+          "Edges of node {} are not sorted by distance",
+          i
+        )));
+      };
 
       for referrer in self.backpointers[*i as usize].iter() {
-        assert!(self.debug_get_neighbor_indices(*referrer).contains(i));
+        if !(self.debug_get_neighbor_indices(*referrer)?.contains(i)) {
+          return Err(Error::InternalError(format!(
+            "Vertex {} has a backpointer to {} but {}'s neighbors don't include {}!",
+            i, *referrer, *referrer, i
+          )));
+        };
       }
     }
+    Ok(())
   }
 
-  fn exists_edge(&self, u: u32, v: u32) -> bool {
-    for e in self.get_edges(u).iter() {
+  fn exists_edge(&self, u: u32, v: u32) -> Result<bool, Error> {
+    for e in self.get_edges(u)?.iter() {
       if v == *e.to {
-        return true;
+        return Ok(true);
       }
     }
-    false
+    Ok(false)
   }
 
   // TODO: expose an interface where the user provides one of their ids already
@@ -679,11 +725,11 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   fn two_hop_neighbors_and_dist_upper_bounds(
     &self,
     int_id: u32,
-  ) -> BinaryHeap<Reverse<SearchResult<u32>>> {
+  ) -> Result<BinaryHeap<Reverse<SearchResult<u32>>>, Error> {
     let mut ret: BinaryHeap<Reverse<SearchResult<u32>>> = BinaryHeap::new();
-    for v in self.get_edges(int_id).iter() {
-      for w in self.get_edges(*v.to).iter() {
-        if !self.exists_edge(int_id, *w.to) {
+    for v in self.get_edges(int_id)?.iter() {
+      for w in self.get_edges(*v.to)?.iter() {
+        if !self.exists_edge(int_id, *w.to)? {
           ret.push(Reverse(SearchResult {
             item: *w.to,
             internal_id: Some(*w.to),
@@ -696,32 +742,40 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         }
       }
     }
-    ret
+    Ok(ret)
   }
 
   fn get_farthest_neighbor(
     self: &DenseKnnGraph<T, S>,
     int_id: u32,
-  ) -> (u32, f32) {
-    let e = self.get_edges(int_id).last().unwrap();
-    (*e.to, *e.distance)
+  ) -> Result<(u32, f32), Error> {
+    let e = self.get_edges(int_id)?.last().ok_or(Error::InternalError(
+      "Failed to get farthest neighbor".to_string(),
+    ))?;
+    Ok((*e.to, *e.distance))
   }
 
   // TODO: return an iterator to avoid allocating a new vec
   fn in_and_out_neighbors(
     self: &DenseKnnGraph<T, S>,
     int_id: u32,
-  ) -> Vec<(u32, f32)> {
+  ) -> Result<Vec<(u32, f32)>, Error> {
     let mut ret = Vec::new();
-    for w in self.get_edges(int_id).iter() {
+    for w in self.get_edges(int_id)?.iter() {
       ret.push((*w.to, *w.distance));
     }
     for w in self.backpointers[int_id as usize].iter() {
-      let w_edges = self.get_edges(*w);
-      let dist = w_edges.iter().find(|e| *e.to == int_id).unwrap().distance;
+      let w_edges = self.get_edges(*w)?;
+      let dist = w_edges
+        .iter()
+        .find(|e| *e.to == int_id)
+        .ok_or(Error::InternalError(
+          "Backpointers and edges are inconsistent".to_string(),
+        ))?
+        .distance;
       ret.push((*w, *dist));
     }
-    ret
+    Ok(ret)
   }
 
   /// Perform RRNP w.r.t. a newly-inserted element q, given the results of
@@ -736,7 +790,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     visited_nodes: &Vec<SearchResult<T>>,
     visited_nodes_distances_to_q: &HashMap<u32, (T, f32)>,
     dist_fn: &dyn Fn(&T, &T) -> f32,
-  ) {
+  ) -> Result<(), Error> {
     let mut w = VecDeque::new();
     for SearchResult {
       item: _,
@@ -745,41 +799,47 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       ..
     } in visited_nodes
     {
-      w.push_back((internal_id.unwrap(), 0, dist));
+      let internal_id: u32 = internal_id.ok_or(Error::InternalError(
+        "Impossible happened: internal id was None inside rrnp".to_string(),
+      ))?;
+      w.push_back((internal_id, 0, dist));
     }
 
     let mut already_rrnped = HashSet::new();
 
     while !w.is_empty() {
-      let (s_int, depth, dist_s_q) = w.pop_front().unwrap();
-      let (_, dist_s_f) = self.get_farthest_neighbor(s_int);
+      let (s_int, depth, dist_s_q) = w.pop_front().ok_or(
+        Error::InternalError("Impossible happened: w is empty".to_string()),
+      )?;
+      let (_, dist_s_f) = self.get_farthest_neighbor(s_int)?;
       if depth < self.config.rrnp_max_depth && dist_s_q < &dist_s_f {
-        for (e, _) in self.in_and_out_neighbors(s_int) {
-          let e_ext = self.mapping.int_to_ext(e);
+        for (e, _) in self.in_and_out_neighbors(s_int)? {
+          let e_ext = self.mapping.int_to_ext(e)?;
           if !already_rrnped.contains(&e)
             && !visited_nodes_distances_to_q.contains_key(&e)
           {
             already_rrnped.insert(e);
             let dist_e_q = dist_fn(e_ext, &q);
-            self.insert_edge_if_closer(e, q_int, dist_e_q);
+            self.insert_edge_if_closer(e, q_int, dist_e_q)?;
           }
         }
       }
     }
+    Ok(())
   }
 
   /// Return the average occlusion (lambda values) of the neighbors of the given
   /// node. This is part of the lazy graph diversification algorithm. See the
   /// paper for details. Returns infinity if LGD is disabled.
-  fn average_occlusion(&self, int_id: u32) -> f32 {
+  fn average_occlusion(&self, int_id: u32) -> Result<f32, Error> {
     if !self.config.use_lgd {
-      return f32::INFINITY;
+      return Ok(f32::INFINITY);
     }
     let mut sum = 0.0;
-    for e in self.get_edges(int_id).iter() {
+    for e in self.get_edges(int_id)?.iter() {
       sum += *e.crowding_factor as f32;
     }
-    sum / self.config.out_degree as f32
+    Ok(sum / self.config.out_degree as f32)
   }
 
   fn query_internal(
@@ -788,8 +848,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     max_results: usize,
     dist_fn: &dyn Fn(&T, &T) -> f32,
     ignore_occluded: bool,
-  ) -> SearchResults<T> {
-    assert!(self.config.num_searchers <= self.num_vertices);
+  ) -> Result<SearchResults<T>, Error> {
     let query_start = Instant::now();
     let mut num_distance_computations = 0;
     let mut compute_distance = |x, y| {
@@ -809,15 +868,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     // Initialize our search with num_searchers initial points.
     // lines 2 to 10 of the pseudocode
-    // TODO: this is broken if deletion occurs. This is a quick fix to see
-    // if the vec improves performance.
-    // TODO: create a test case that fails because of this before fixing it. It
-    // will make a good regression test.
-    assert!(!self.starting_points_reservoir_sample.is_empty());
     let mut min_r_dist = f32::INFINITY;
     let mut max_r_dist = f32::NEG_INFINITY;
     for StartPoint { id: r_int, .. } in &self.starting_points_reservoir_sample {
-      let r_ext = self.mapping.int_to_ext(*r_int);
+      let r_ext = self.mapping.int_to_ext(*r_int)?;
       let r_dist = compute_distance(q, r_ext);
       if r_dist < min_r_dist {
         min_r_dist = r_dist;
@@ -868,15 +922,24 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         q_max_heap.pop();
       }
 
-      let Reverse(sr) = r_min_heap.pop().unwrap();
-      let f = { q_max_heap.peek().unwrap().clone() };
-      let sr_int = &sr.internal_id.unwrap();
+      let Reverse(sr) = r_min_heap
+        .pop()
+        .ok_or(Error::InternalError("r_min_heap is empty".to_string()))?;
+      let f = {
+        q_max_heap
+          .peek()
+          .ok_or(Error::InternalError("q_max_heap is empty".to_string()))?
+          .clone()
+      };
+      let sr_int = &sr
+        .internal_id
+        .ok_or(Error::InternalError("No internal id".to_string()))?;
       if sr.dist > f.dist {
         break;
       }
 
-      let average_lambda = self.average_occlusion(*sr_int);
-      let sr_edges = self.get_edges(*sr_int);
+      let average_lambda = self.average_occlusion(*sr_int)?;
+      let sr_edges = self.get_edges(*sr_int)?;
       let r_nbrs_iter = self.backpointers[*sr_int as usize].iter().chain(
         sr_edges
           .iter()
@@ -887,7 +950,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       );
 
       for e in r_nbrs_iter {
-        let e_ext = self.mapping.int_to_ext(*e);
+        let e_ext = self.mapping.int_to_ext(*e)?;
         if !visited.contains(e) {
           visited.insert(*e);
           let e_dist = compute_distance(q, e_ext);
@@ -930,7 +993,9 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     // construct the visited vec from visited and visited_distances
     let mut visited_vec: Vec<SearchResult<T>> = Vec::new();
     for i_int in visited {
-      let (i_ext, i_dist) = visited_distances.get(&i_int).unwrap();
+      let (i_ext, i_dist) = visited_distances
+        .get(&i_int)
+        .ok_or(Error::InternalError("missing internal id".to_string()))?;
       visited_vec.push(SearchResult::new(
         i_ext.clone(),
         Some(i_int),
@@ -940,17 +1005,19 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       ));
     }
     let approximate_nearest_neighbors = q_max_heap.into_sorted_vec();
-    let nearest_neighbor = approximate_nearest_neighbors.last().unwrap();
+    let nearest_neighbor =
+      approximate_nearest_neighbors
+        .last()
+        .ok_or(Error::InternalError(
+          "no nearest neighbors found in non-empty graph".to_string(),
+        ))?;
     let nearest_neighbor_distance = nearest_neighbor.dist;
 
     let nearest_neighbor_path_length = nearest_neighbor.search_depth as usize;
 
-    // let nearest_neighbor_starting_point = search_root_ancestor[r_min_heap.peek().unwrap().0.internal_id.unwrap();]
-    // let distance_from_nearest_neighbor_to_its_starting_point =
-
     let num_visited = visited_vec.len();
 
-    SearchResults {
+    Ok(SearchResults {
       approximate_nearest_neighbors,
       visited_nodes: visited_vec,
       visited_nodes_distances_to_q: visited_distances,
@@ -966,7 +1033,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         num_visited,
         // distance_from_nearest_neighbor_to_its_starting_point: todo!(),
       }),
-    }
+    })
   }
 
   /// Use reservoir sampling to (possibly) insert a new starting point into
@@ -1030,7 +1097,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     q: T,
     dist_fn: &dyn Fn(&T, &T) -> f32,
     prng: &mut R,
-  ) {
+  ) -> Result<(), Error> {
     //TODO: return the index of the new data point
     //TODO: API for using internal ids, for improved speed.
     let SearchResults {
@@ -1038,15 +1105,27 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       visited_nodes,
       visited_nodes_distances_to_q,
       search_stats: _,
-    } =
-      self.query_internal(&q, self.config.out_degree as usize, dist_fn, false);
+    } = self.query_internal(
+      &q,
+      self.config.out_degree as usize,
+      dist_fn,
+      false,
+    )?;
 
-    let (neighbors, dists) = nearest_neighbors
-      .iter()
-      .map(|sr| (sr.internal_id.unwrap(), sr.dist))
-      .unzip();
-    let q_int = self.mapping.insert(&q);
-    self.insert_vertex(q_int, neighbors, dists);
+    let (neighbors, dists): (Vec<Result<u32, Error>>, Vec<f32>) =
+      nearest_neighbors
+        .iter()
+        .map(|sr| {
+          (
+            sr.internal_id
+              .ok_or(Error::InternalError("missing internal id".to_string())),
+            sr.dist,
+          )
+        })
+        .unzip();
+    let neighbors = neighbors.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let q_int = self.mapping.insert(&q)?;
+    self.insert_vertex(q_int, neighbors, dists)?;
 
     for SearchResult {
       item: _,
@@ -1055,13 +1134,14 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       ..
     } in &visited_nodes
     {
-      let r_int = r_int.unwrap();
+      let r_int =
+        r_int.ok_or(Error::InternalError("no internal id".to_string()))?;
       // TODO: collect stats on how often is_inserted is true and how many
       // times we call insert_edge_if_closer. This could be a big waste of time.
-      let is_inserted = self.insert_edge_if_closer(r_int, q_int, *r_dist);
+      let is_inserted = self.insert_edge_if_closer(r_int, q_int, *r_dist)?;
       let r_edges = get_edges_mut_macro!(self, r_int);
       if is_inserted && self.config.use_lgd {
-        apply_lgd(r_edges, q_int, &visited_nodes_distances_to_q);
+        apply_lgd(r_edges, q_int, &visited_nodes_distances_to_q)?;
       }
     }
     if self.config.use_rrnp {
@@ -1071,9 +1151,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         &visited_nodes,
         &visited_nodes_distances_to_q,
         dist_fn,
-      );
+      )?;
     }
     self.maybe_insert_starting_point(q_int, prng);
+    Ok(())
   }
 
   pub(crate) fn delete<R: RngCore>(
@@ -1081,8 +1162,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     ext_id: T,
     dist_fn: &dyn Fn(&T, &T) -> f32,
     prng: &mut R,
-  ) {
-    assert!(self.num_vertices + 1 > self.config.out_degree as u32);
+  ) -> Result<(), Error> {
+    if self.num_vertices < self.config.out_degree as u32 {
+      return Err(Error::InternalError("graph is too small to delete a node while maintaining internal invariants".to_string()));
+    };
     match self.mapping.external_to_internal_ids.get(&ext_id) {
       None => {
         // TODO: return a warning?
@@ -1096,7 +1179,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         for referrer in self
           .backpointers
           .get(int_id as usize)
-          .unwrap()
+          .ok_or(Error::InternalError("missing backpointers".to_string()))?
           .clone() // TODO: remove clone
           .iter()
         {
@@ -1108,9 +1191,9 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
           // upper bound distance, computed as dist(u,v) + dist(v,w). This
           // requires the triangle inequality to hold for the user's metric
           let referrer_nbrs: HashSet<u32> =
-            self.get_edges(*referrer).iter().map(|x| *x.to).collect();
+            self.get_edges(*referrer)?.iter().map(|x| *x.to).collect();
           let mut referrer_nbrs_of_nbrs =
-            self.two_hop_neighbors_and_dist_upper_bounds(*referrer);
+            self.two_hop_neighbors_and_dist_upper_bounds(*referrer)?;
 
           let (new_referent, dist_referrer_new_referent) = loop {
             match referrer_nbrs_of_nbrs.pop() {
@@ -1124,76 +1207,98 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
                   approximate_nearest_neighbors: nearest_neighbors,
                   ..
                 } = self.query_internal(
-                  self.mapping.int_to_ext(*referrer),
+                  self.mapping.int_to_ext(*referrer)?,
                   // we need to find one new node who isn't a neighbor, the
                   // node being deleted, or referrer itself, so we search for
                   // one more than that number.
                   self.config.out_degree as usize + 3,
                   dist_fn,
                   false, // we need all the results we can find, so don't ignore occluded nodes
-                );
+                )?;
 
                 let nearest_neighbor = nearest_neighbors
                   .iter()
-                  .map(|sr| (sr.internal_id.unwrap(), sr.dist))
-                  .find(|(res_int_id, _dist)| {
-                    *res_int_id != int_id
-                      && *res_int_id != *referrer
-                      && !referrer_nbrs.contains(res_int_id)
+                  .map(|sr| {
+                    (
+                      sr.internal_id.ok_or(Error::InternalError(
+                        "Internal id not found".to_string(),
+                      )),
+                      sr.dist,
+                    )
+                  })
+                  .find_map(|res| match res {
+                    (Ok(res_int_id), dist) => {
+                      if res_int_id != int_id
+                        && res_int_id != *referrer
+                        && !referrer_nbrs.contains(&res_int_id)
+                      {
+                        Some(Ok((res_int_id, dist)))
+                      } else {
+                        None
+                      }
+                    }
+                    (Err(e), _) => Some(Err(e)),
                   });
 
-                match nearest_neighbor {
-                  None => panic!(
-                    "No replacement neighbors found -- is the graph too small?"
-                  ),
-                  Some((id, dist)) => {
-                    break (id, dist);
-                  }
-                }
+                break nearest_neighbor.ok_or(Error::InternalError(
+                  "no replacement neighbors found -- is the graph too small?"
+                    .to_string(),
+                ))?;
               }
+
               Some(Reverse(SearchResult { item: id, .. })) => {
                 if id != int_id
                   && id != *referrer
                   && !referrer_nbrs.contains(&id)
                 {
-                  let dist = self.dist_int(*referrer, id, dist_fn);
-                  break (id, dist);
+                  let dist = self.dist_int(*referrer, id, dist_fn)?;
+                  break Ok((id, dist));
                 }
               }
             }
-          };
+          }?;
 
           self.replace_edge_no_backptr_update(
             *referrer,
             int_id,
             new_referent,
             dist_referrer_new_referent,
-          );
+          )?;
 
           // Insert referrer into the backpointers of the new referent.
-          let new_referent_backpointers =
-            self.backpointers.get_mut(new_referent as usize).unwrap();
+          let new_referent_backpointers = self
+            .backpointers
+            .get_mut(new_referent as usize)
+            .ok_or(Error::InternalError("missing backpointers".to_string()))?;
           new_referent_backpointers.push(*referrer);
         }
 
         // Remove backpointers for all nodes the deleted node was pointing to.
         for nbr in get_edges_macro!(self, int_id).iter().map(|x| *x.to) {
-          let nbr_backpointers =
-            self.backpointers.get_mut(nbr as usize).unwrap();
+          let nbr_backpointers = self
+            .backpointers
+            .get_mut(nbr as usize)
+            .ok_or(Error::InternalError("missing backpointers".to_string()))?;
 
-          let ix_to_remove =
-            nbr_backpointers.iter().position(|x| *x == int_id).unwrap();
+          let ix_to_remove = nbr_backpointers
+            .iter()
+            .position(|x| *x == int_id)
+            .ok_or(Error::InternalError("missing backpointers".to_string()))?;
           nbr_backpointers.swap_remove(ix_to_remove);
         }
 
         // Reset backpointers for the deleted node.
-        let backpointers = self.backpointers.get_mut(int_id as usize).unwrap();
+        let backpointers = self
+          .backpointers
+          .get_mut(int_id as usize)
+          .ok_or(Error::InternalError("missing backpointers".to_string()))?;
         *backpointers =
           Vec::<u32>::with_capacity(self.config.out_degree as usize);
-        self.mapping.delete(&ext_id);
+        self.mapping.delete(&ext_id)?;
         self.num_vertices -= 1;
       }
     }
+    Ok(())
   }
 
   // TODO: return fewer than expected results if num_searchers or k is
@@ -1214,7 +1319,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     max_results: usize,
     dist_fn: &dyn Fn(&T, &T) -> f32,
     _prng: &mut R,
-  ) -> SearchResults<T> {
+  ) -> Result<SearchResults<T>, Error> {
     self.query_internal(q, max_results, dist_fn, true)
   }
 }
@@ -1223,15 +1328,41 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
   r_edges: &mut EdgeSliceMut,
   q_int: u32,
   visited_node_distances_to_q: &HashMap<u32, (T, f32)>,
-) {
-  let q_ix = r_edges.iter().position(|e| *e.to == q_int).unwrap();
-  let q_r_dist = *r_edges.get(q_ix).unwrap().distance;
+) -> Result<(), Error> {
+  let q_ix =
+    r_edges
+      .iter()
+      .position(|e| *e.to == q_int)
+      .ok_or(Error::InternalError(
+        "missing edge in apply_lgd".to_string(),
+      ))?;
+  let q_r_dist = *r_edges
+    .get(q_ix)
+    .ok_or(Error::InternalError(
+      "missing edge in apply_lgd".to_string(),
+    ))?
+    .distance;
 
-  *r_edges.get_mut(q_ix).unwrap().crowding_factor = DEFAULT_LAMBDA;
+  *r_edges
+    .get_mut(q_ix)
+    .ok_or(Error::InternalError(
+      "missing edge in apply_lgd".to_string(),
+    ))?
+    .crowding_factor = DEFAULT_LAMBDA;
 
   for s_ix in 0..r_edges.len() {
-    let s_int = *r_edges.get(s_ix).unwrap().to;
-    let s_r_dist = *r_edges.get(s_ix).unwrap().distance;
+    let s_int = *r_edges
+      .get(s_ix)
+      .ok_or(Error::InternalError(
+        "missing edge in apply_lgd".to_string(),
+      ))?
+      .to;
+    let s_r_dist = *r_edges
+      .get(s_ix)
+      .ok_or(Error::InternalError(
+        "missing edge in apply_lgd".to_string(),
+      ))?
+      .distance;
     let s_q_dist = visited_node_distances_to_q.get(&s_int).map(|d| d.1);
 
     match s_q_dist {
@@ -1242,11 +1373,21 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
         }
         // rule 2 from the paper
         else if s_r_dist < q_r_dist && s_q_dist < q_r_dist {
-          *r_edges.get_mut(q_ix).unwrap().crowding_factor += 1;
+          *r_edges
+            .get_mut(q_ix)
+            .ok_or(Error::InternalError(
+              "missing edge in apply_lgd".to_string(),
+            ))?
+            .crowding_factor += 1;
         }
         // rule 3 from the paper: s_r_dist > q_r_dist, q occludes s
         else if s_q_dist < s_r_dist {
-          *r_edges.get_mut(s_ix).unwrap().crowding_factor += 1;
+          *r_edges
+            .get_mut(s_ix)
+            .ok_or(Error::InternalError(
+              "missing edge in apply_lgd".to_string(),
+            ))?
+            .crowding_factor += 1;
         }
       }
 
@@ -1255,6 +1396,7 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
       }
     }
   }
+  Ok(())
 }
 
 /// Constructs an exact k-nn graph on the given IDs. O(n^2).
@@ -1270,29 +1412,25 @@ pub(crate) fn exhaustive_knn_graph_internal<
   config: KnnGraphConfig<S>,
   dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
-) -> DenseKnnGraph<T, S> {
+) -> Result<DenseKnnGraph<T, S>, Error> {
   let n = ids.len();
-  // TODO: return Either
 
-  assert!(
-    config.out_degree as usize <= n,
-    "out_degree ({}) must be <= ids.len() ({})",
-    config.out_degree,
-    n,
-  );
+  if config.out_degree as usize >= n {
+    return Err(Error::OutDegreeTooLarge(config.out_degree, n));
+  }
 
   let mut g: DenseKnnGraph<T, S> = DenseKnnGraph::empty(config.clone());
 
   for i_ext in ids.iter() {
     let mut knn = BinaryHeap::new();
-    let i = g.mapping.insert(i_ext);
+    let i = g.mapping.insert(i_ext)?;
     // TODO: prng in config.
     g.maybe_insert_starting_point(i, prng);
     for j_ext in ids.iter() {
       if i_ext == j_ext {
         continue;
       }
-      let j = g.mapping.insert(*j_ext);
+      let j = g.mapping.insert(*j_ext)?;
       let dist = dist_fn(i_ext, j_ext);
       knn.push(SearchResult::new(j, Some(j), dist, 0, 0));
 
@@ -1301,9 +1439,13 @@ pub(crate) fn exhaustive_knn_graph_internal<
       }
     }
     for edge_ix in 0..config.out_degree as usize {
-      let SearchResult { item: id, dist, .. } = knn.pop().unwrap();
-      let mut i_edges_mut = g.get_edges_mut(i);
-      let e = i_edges_mut.get_mut(edge_ix).unwrap();
+      let SearchResult { item: id, dist, .. } = knn
+        .pop()
+        .ok_or(Error::InternalError("heap unexpectedly empty".to_string()))?;
+      let mut i_edges_mut = g.get_edges_mut(i)?;
+      let e = i_edges_mut.get_mut(edge_ix).ok_or(Error::InternalError(
+        "i_edges_mut unexpectedly empty".to_string(),
+      ))?;
 
       *e.to = id;
       *e.distance = dist;
@@ -1316,14 +1458,15 @@ pub(crate) fn exhaustive_knn_graph_internal<
   g.num_vertices = ids.len() as u32;
 
   for i in 0..n {
-    g.sort_edges(i as u32)
+    g.sort_edges(i as u32)?;
   }
 
-  g
+  Ok(g)
 }
 
 #[cfg(test)]
 mod tests {
+  #![allow(clippy::unwrap_used)]
   extern crate nohash_hasher;
   extern crate ordered_float;
   use std::hash::BuildHasherDefault;
@@ -1411,14 +1554,15 @@ mod tests {
       config,
       dist_fn,
       &mut prng,
-    );
-    g.consistency_check();
-    assert_eq!(g.debug_get_neighbor_indices(0), vec![1, 2]);
-    assert_eq!(g.debug_get_neighbor_indices(1), vec![2, 0]);
-    assert_eq!(g.debug_get_neighbor_indices(2), vec![1, 0]);
-    assert_eq!(g.debug_get_neighbor_indices(3), vec![4, 5]);
-    assert_eq!(g.debug_get_neighbor_indices(4), vec![3, 5]);
-    assert_eq!(g.debug_get_neighbor_indices(5), vec![4, 3]);
+    )
+    .unwrap();
+    g.consistency_check().unwrap();
+    assert_eq!(g.debug_get_neighbor_indices(0).unwrap(), vec![1, 2]);
+    assert_eq!(g.debug_get_neighbor_indices(1).unwrap(), vec![2, 0]);
+    assert_eq!(g.debug_get_neighbor_indices(2).unwrap(), vec![1, 0]);
+    assert_eq!(g.debug_get_neighbor_indices(3).unwrap(), vec![4, 5]);
+    assert_eq!(g.debug_get_neighbor_indices(4).unwrap(), vec![3, 5]);
+    assert_eq!(g.debug_get_neighbor_indices(5).unwrap(), vec![4, 3]);
   }
 
   #[test]
@@ -1432,23 +1576,23 @@ mod tests {
     // order starting from 0, so we are inserting 3 unused u32 external ids,
     // 0,1,2 which get mapped to internal ids 0,1,2. Annoying and unclear, but
     // necessary at the moment.
-    g.mapping.insert(&0);
-    g.mapping.insert(&1);
-    g.mapping.insert(&2);
-    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
-    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
-    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
+    g.mapping.insert(&0).unwrap();
+    g.mapping.insert(&1).unwrap();
+    g.mapping.insert(&2).unwrap();
+    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]).unwrap();
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]).unwrap();
+    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]).unwrap();
 
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(0)),
+      edge_slice_to_vec(g.get_edges(0).unwrap()),
       [(1, 1.0, 0), (2, 2.0, 0)].as_slice()
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(1)),
+      edge_slice_to_vec(g.get_edges(1).unwrap()),
       [(2, 1.0, 0), (0, 1.0, 0)].as_slice()
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(2)),
+      edge_slice_to_vec(g.get_edges(2).unwrap()),
       [(1, 1.0, 0), (0, 2.0, 0)].as_slice()
     );
   }
@@ -1457,17 +1601,18 @@ mod tests {
   #[should_panic]
   fn test_insert_vertex_panic_too_many_vertex() {
     let mut g: DenseKnnGraph<u32, Nhh> = DenseKnnGraph::empty(mk_config(2));
-    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]);
-    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
-    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]);
+    g.insert_vertex(0, vec![2, 1], vec![2.0, 1.0]).unwrap();
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]).unwrap();
+    g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]).unwrap();
   }
 
   #[test]
   #[should_panic]
   fn test_insert_vertex_panic_wrong_neighbor_length() {
     let mut g: DenseKnnGraph<u32, Nhh> = DenseKnnGraph::empty(mk_config(2));
-    g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1]);
-    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]);
+    g.insert_vertex(0, vec![2, 1, 0], vec![2.0, 1.0, 10.1])
+      .unwrap();
+    g.insert_vertex(1, vec![2, 0], vec![1.0, 1.0]).unwrap();
   }
 
   #[test]
@@ -1477,21 +1622,33 @@ mod tests {
     let mut g: DenseKnnGraph<u32, Nhh> = DenseKnnGraph::empty(config);
 
     // see note in test_insert_vertex
-    g.mapping.insert(&0);
-    g.mapping.insert(&1);
-    g.mapping.insert(&2);
+    g.mapping.insert(&0).unwrap();
+    g.mapping.insert(&1).unwrap();
+    g.mapping.insert(&2).unwrap();
 
-    g.insert_vertex(0, vec![2], vec![2.0]);
-    g.insert_vertex(1, vec![2], vec![1.0]);
-    g.insert_vertex(2, vec![1], vec![1.0]);
+    g.insert_vertex(0, vec![2], vec![2.0]).unwrap();
+    g.insert_vertex(1, vec![2], vec![1.0]).unwrap();
+    g.insert_vertex(2, vec![1], vec![1.0]).unwrap();
 
-    assert_eq!(edge_slice_to_vec(g.get_edges(0)), [(2, 2.0, 0)].as_slice());
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(0).unwrap()),
+      [(2, 2.0, 0)].as_slice()
+    );
 
-    assert!(g.insert_edge_if_closer(0, 1, 1.0));
+    assert!(g.insert_edge_if_closer(0, 1, 1.0).unwrap());
 
-    assert_eq!(edge_slice_to_vec(g.get_edges(0)), [(1, 1.0, 0)].as_slice());
-    assert_eq!(edge_slice_to_vec(g.get_edges(1)), [(2, 1.0, 0)].as_slice());
-    assert_eq!(edge_slice_to_vec(g.get_edges(2)), [(1, 1.0, 0)].as_slice());
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(0).unwrap()),
+      [(1, 1.0, 0)].as_slice()
+    );
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(1).unwrap()),
+      [(2, 1.0, 0)].as_slice()
+    );
+    assert_eq!(
+      edge_slice_to_vec(g.get_edges(2).unwrap()),
+      [(1, 1.0, 0)].as_slice()
+    );
   }
 
   #[test]
@@ -1518,12 +1675,13 @@ mod tests {
       mk_config(11),
       dist_fn,
       &mut prng,
-    );
+    )
+    .unwrap();
     for i in 6..11 {
       println!("doing {i}");
-      g.insert(i, dist_fn, &mut prng);
+      g.insert(i, dist_fn, &mut prng).unwrap();
     }
-    g.consistency_check();
+    g.consistency_check().unwrap();
   }
 
   #[test]
@@ -1540,9 +1698,10 @@ mod tests {
       config,
       dist_fn,
       &mut prng,
-    );
-    g.delete(3, dist_fn, &mut prng);
-    g.consistency_check();
+    )
+    .unwrap();
+    g.delete(3, dist_fn, &mut prng).unwrap();
+    g.consistency_check().unwrap();
   }
 
   #[test]
@@ -1577,21 +1736,22 @@ mod tests {
       config,
       dist_fn,
       &mut prng,
-    );
-    g.consistency_check();
-    g.delete(7, dist_fn, &mut prng);
-    g.delete(15, dist_fn, &mut prng);
-    g.delete(0, dist_fn, &mut prng);
-    g.delete(1, dist_fn, &mut prng);
-    g.delete(2, dist_fn, &mut prng);
-    g.delete(3, dist_fn, &mut prng);
-    g.delete(4, dist_fn, &mut prng);
-    g.delete(5, dist_fn, &mut prng);
-    g.delete(6, dist_fn, &mut prng);
-    g.delete(8, dist_fn, &mut prng);
-    g.consistency_check();
+    )
+    .unwrap();
+    g.consistency_check().unwrap();
+    g.delete(7, dist_fn, &mut prng).unwrap();
+    g.delete(15, dist_fn, &mut prng).unwrap();
+    g.delete(0, dist_fn, &mut prng).unwrap();
+    g.delete(1, dist_fn, &mut prng).unwrap();
+    g.delete(2, dist_fn, &mut prng).unwrap();
+    g.delete(3, dist_fn, &mut prng).unwrap();
+    g.delete(4, dist_fn, &mut prng).unwrap();
+    g.delete(5, dist_fn, &mut prng).unwrap();
+    g.delete(6, dist_fn, &mut prng).unwrap();
+    g.delete(8, dist_fn, &mut prng).unwrap();
+    g.consistency_check().unwrap();
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-    g.query(&1, 2, dist_fn, &mut prng);
+    g.query(&1, 2, dist_fn, &mut prng).unwrap();
   }
 
   #[test]
@@ -1609,9 +1769,10 @@ mod tests {
       config,
       dist_fn,
       &mut prng,
-    );
-    g.consistency_check();
-    g.insert(6, dist_fn, &mut prng);
-    g.consistency_check();
+    )
+    .unwrap();
+    g.consistency_check().unwrap();
+    g.insert(6, dist_fn, &mut prng).unwrap();
+    g.consistency_check().unwrap();
   }
 }
