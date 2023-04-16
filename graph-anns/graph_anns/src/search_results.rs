@@ -160,11 +160,11 @@ impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
 
     merged
       .approximate_nearest_neighbors
-      .sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+      .sort_by(|a, b| a.dist.total_cmp(&b.dist));
     merged.visited_nodes.extend(other.visited_nodes.clone());
     merged
       .visited_nodes
-      .sort_by(|a, b| a.internal_id.partial_cmp(&b.internal_id).unwrap());
+      .sort_by(|a, b| a.internal_id.cmp(&b.internal_id));
     merged.visited_nodes.dedup_by_key(|x| x.internal_id);
     merged
       .visited_nodes_distances_to_q

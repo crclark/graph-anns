@@ -1,4 +1,8 @@
 #![deny(missing_docs)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
+#![warn(clippy::panic_in_result_fn)]
+#![warn(non_fmt_panics)]
 
 //! An implementation of the approximate nearest-neighbor search data structure
 //! and algorithms
@@ -59,7 +63,7 @@
 //! NotNan::new(4f32).unwrap(),
 //! ];
 //!
-//! g.insert(example_vec.clone(), &mut prng);
+//! g.insert(example_vec.clone(), &mut prng).unwrap();
 //!
 //! let SearchResults {
 //! approximate_nearest_neighbors: nearest_neighbors,
@@ -73,7 +77,7 @@
 //! ],
 //! 1,
 //! &mut prng,
-//! );
+//! ).unwrap();
 //! assert_eq!(nearest_neighbors[0].item, example_vec);
 //! ```
 extern crate bincode;
@@ -82,6 +86,7 @@ extern crate rand;
 extern crate rand_xoshiro;
 extern crate serde;
 extern crate soa_derive;
+extern crate thiserror;
 
 use rand::RngCore;
 use serde::Deserialize;
@@ -95,6 +100,10 @@ use std::hash::BuildHasher;
 use std::io::BufWriter;
 
 mod edge;
+
+mod error;
+pub use error::*;
+
 #[allow(unused_imports)]
 use edge::EdgeSlice;
 
@@ -117,15 +126,12 @@ pub use space_report::*;
 
 /// A trait for a nearest neighbor search data structure.
 pub trait NN<T> {
-  // TODO: return types with error sums, more informative delete (did it exist?)
-  // etc. Eliminate all panics that are not internal errors.
-
   // TODO: more functions in this interface.
 
   /// Insert a new element into the nearest neighbor data structure.
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R);
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error>;
   /// Delete an element from the nearest neighbor data structure.
-  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R);
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error>;
   /// Query the nearest neighbor data structure for the approximate
   /// nearest neighbors of the given element.
   fn query<R: RngCore>(
@@ -133,7 +139,7 @@ pub trait NN<T> {
     q: &T,
     max_results: usize,
     prng: &mut R,
-  ) -> SearchResults<T>;
+  ) -> Result<SearchResults<T>, Error>;
 }
 
 /// A nearest neighbor search data structure that uses exhaustive search.
@@ -204,13 +210,15 @@ fn convert_bruteforce_to_dense<
   config: KnnGraphConfig<S>,
   dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
-) -> DenseKnnGraph<T, S> {
+) -> Result<DenseKnnGraph<T, S>, Error> {
   let ids = bf.contents.iter().collect();
-  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, dist_fn, prng).inner
+  let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, dist_fn, prng)?.inner
   else {
-    panic!("internal error: exhaustive_knn_graph returned a small graph");
+    return Err(Error::InternalError(
+      "internal error: exhaustive_knn_graph returned a small graph".to_string(),
+    ));
   };
-  g
+  Ok(g)
 }
 
 fn convert_dense_to_bruteforce<
@@ -297,12 +305,12 @@ impl<
     S: BuildHasher + Clone + Default,
   > NN<T> for Knn<'a, T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
-    self.inner.insert(x, self.dist_fn, prng);
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error> {
+    self.inner.insert(x, self.dist_fn, prng)
   }
 
-  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
-    self.inner.delete(x, self.dist_fn, prng);
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error> {
+    self.inner.delete(x, self.dist_fn, prng)
   }
 
   fn query<R: RngCore>(
@@ -310,7 +318,7 @@ impl<
     q: &T,
     max_results: usize,
     prng: &mut R,
-  ) -> SearchResults<T> {
+  ) -> Result<SearchResults<T>, Error> {
     self.inner.query(q, max_results, self.dist_fn, prng)
   }
 }
@@ -332,14 +340,14 @@ impl<
     }
   }
 
-  /// Panics if graph structure is internally inconsistent. Used for testing.
-  pub fn debug_consistency_check(&self) {
-    self.inner.debug_consistency_check();
+  /// Returns error if graph structure is internally inconsistent. Used for testing.
+  pub fn debug_consistency_check(&self) -> Result<(), Error> {
+    self.inner.debug_consistency_check()
   }
 
   /// Returns information about the length and capacity of all data structures
   /// in the graph.
-  pub fn debug_size_stats(&self) -> SpaceReport {
+  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
     self.inner.debug_size_stats()
   }
 }
@@ -374,11 +382,11 @@ impl<
     x: T,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
     prng: &mut R,
-  ) {
+  ) -> Result<(), error::Error> {
     match self {
       KnnInner::Small { g, config } => {
         if config.capacity as usize == g.contents.len() {
-          panic!("TODO create error type etc.");
+          Err(Error::CapacityExceeded)
         } else if g.contents.len()
           > max(config.out_degree as usize, config.num_searchers as usize)
         {
@@ -388,10 +396,11 @@ impl<
             #[allow(clippy::clone_double_ref)]
             dist_fn.clone(),
             prng,
-          ));
-          self.insert(x, dist_fn, prng);
+          )?);
+          self.insert(x, dist_fn, prng)
         } else {
           g.insert(x);
+          Ok(())
         }
       }
       KnnInner::Large(g) => g.insert(x, dist_fn, prng),
@@ -403,10 +412,11 @@ impl<
     x: T,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
     prng: &mut R,
-  ) {
+  ) -> Result<(), Error> {
     match self {
       KnnInner::Small { g, .. } => {
         g.delete(x);
+        Ok(())
       }
       KnnInner::Large(g) => {
         if g.mapping.external_to_internal_ids.len()
@@ -416,8 +426,9 @@ impl<
           let mut small_g = convert_dense_to_bruteforce(g);
           small_g.delete(x);
           *self = KnnInner::Small { g: small_g, config };
+          Ok(())
         } else {
-          g.delete(x, dist_fn, prng);
+          g.delete(x, dist_fn, prng)
         }
       }
     }
@@ -429,9 +440,9 @@ impl<
     max_results: usize,
     dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
     prng: &mut R,
-  ) -> SearchResults<T> {
+  ) -> Result<SearchResults<T>, error::Error> {
     match self {
-      KnnInner::Small { g, .. } => g.query(q, max_results, dist_fn),
+      KnnInner::Small { g, .. } => Ok(g.query(q, max_results, dist_fn)),
       KnnInner::Large(g) => g.query(q, max_results, dist_fn, prng),
     }
   }
@@ -448,21 +459,19 @@ impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
   }
 
-  /// Panics if graph structure is internally inconsistent. Used for testing.
-  pub fn debug_consistency_check(&self) {
+  /// Returns error if graph structure is internally inconsistent. Used for testing.
+  pub fn debug_consistency_check(&self) -> Result<(), Error> {
     match self {
-      KnnInner::Small { .. } => {}
-      KnnInner::Large(g) => {
-        g.consistency_check();
-      }
+      KnnInner::Small { .. } => Ok(()),
+      KnnInner::Large(g) => g.consistency_check(),
     }
   }
 
   /// Returns information about the length and capacity of all data structures
   /// in the graph.
-  pub fn debug_size_stats(&self) -> SpaceReport {
+  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
     match self {
-      KnnInner::Small { g, .. } => g.debug_size_stats(),
+      KnnInner::Small { g, .. } => Ok(g.debug_size_stats()),
       KnnInner::Large(g) => g.debug_size_stats(),
     }
   }
@@ -483,17 +492,18 @@ pub fn exhaustive_knn_graph<
   config: KnnGraphConfig<S>,
   dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
-) -> Knn<'a, T, S> {
-  Knn {
+) -> Result<Knn<'a, T, S>, Error> {
+  Ok(Knn {
     inner: KnnInner::Large(exhaustive_knn_graph_internal(
       ids, config, dist_fn, prng,
-    )),
+    )?),
     dist_fn,
-  }
+  })
 }
 
 #[cfg(test)]
 mod tests {
+  #![allow(clippy::unwrap_used)]
   extern crate nohash_hasher;
   extern crate ordered_float;
   use std::{collections::hash_map::RandomState, hash::BuildHasherDefault};
@@ -572,12 +582,13 @@ mod tests {
       config,
       dist_fn,
       &mut prng,
-    );
-    g.consistency_check();
+    )
+    .unwrap();
+    g.consistency_check().unwrap();
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
       ..
-    } = g.query(&1, 2, dist_fn, &mut prng);
+    } = g.query(&1, 2, dist_fn, &mut prng).unwrap();
     assert_eq!(
       nearest_neighbors
         .iter()
@@ -606,9 +617,9 @@ mod tests {
       &|x: &u32, y: &u32| sq_euclidean(&db[*x as usize], &db[*y as usize]);
     let mut g: KnnInner<u32, Nhh> = KnnInner::new(mk_config(10));
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-    g.insert(0, dist_fn, &mut prng);
+    g.insert(0, dist_fn, &mut prng).unwrap();
 
-    g.debug_consistency_check();
+    g.debug_consistency_check().unwrap();
   }
 
   // An example of inserting vecs of floats directly into the graph, rather than
@@ -651,7 +662,8 @@ mod tests {
             NotNan::new(4f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(2f32).unwrap(),
@@ -660,7 +672,8 @@ mod tests {
             NotNan::new(6f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(3f32).unwrap(),
@@ -669,7 +682,8 @@ mod tests {
             NotNan::new(12f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(23f32).unwrap(),
@@ -678,7 +692,8 @@ mod tests {
             NotNan::new(142f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(37f32).unwrap(),
@@ -687,7 +702,8 @@ mod tests {
             NotNan::new(122f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(13f32).unwrap(),
@@ -696,7 +712,8 @@ mod tests {
             NotNan::new(125f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(13f32).unwrap(),
@@ -705,7 +722,8 @@ mod tests {
             NotNan::new(12f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
         g.insert(
           vec![
             NotNan::new(33f32).unwrap(),
@@ -714,21 +732,24 @@ mod tests {
             NotNan::new(312f32).unwrap(),
           ],
           &mut prng,
-        );
+        )
+        .unwrap();
 
         let SearchResults {
           approximate_nearest_neighbors: nearest_neighbors,
           ..
-        } = g.query(
-          &vec![
-            NotNan::new(34f32).unwrap(),
-            NotNan::new(5f32).unwrap(),
-            NotNan::new(53f32).unwrap(),
-            NotNan::new(312f32).unwrap(),
-          ],
-          1,
-          &mut prng,
-        );
+        } = g
+          .query(
+            &vec![
+              NotNan::new(34f32).unwrap(),
+              NotNan::new(5f32).unwrap(),
+              NotNan::new(53f32).unwrap(),
+              NotNan::new(312f32).unwrap(),
+            ],
+            1,
+            &mut prng,
+          )
+          .unwrap();
         assert_eq!(
           nearest_neighbors
             .iter()

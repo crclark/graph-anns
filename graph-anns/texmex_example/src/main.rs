@@ -15,6 +15,7 @@ extern crate serde;
 extern crate tinyset;
 
 use clap::Parser;
+use graph_anns::Error;
 use graph_anns::*;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use rand::{RngCore, SeedableRng};
@@ -149,7 +150,7 @@ fn load_texmex_to_dense(
       println!("inserting {i}");
       println!("elapsed: {:?}", start_inserting.elapsed());
     }
-    g.insert(ID::Base(i), &mut prng);
+    g.insert(ID::Base(i), &mut prng).unwrap();
   }
   println!(
     "Finished building the nearest neighbors graph in {:?}",
@@ -211,7 +212,7 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
       approximate_nearest_neighbors,
       search_stats,
       ..
-    } = g.query(&query, r, prng);
+    } = g.query(&query, r, prng).unwrap();
 
     let mut found_closest: bool = false;
     // TODO: passing a PRNG into every query? Just store it in the graph.
@@ -435,7 +436,7 @@ impl<
     self
       .graphs
       .iter()
-      .map(|g| g.read().unwrap().debug_size_stats())
+      .map(|g| g.read().unwrap().debug_size_stats().unwrap())
       .reduce(|acc, e| acc.merge(&e))
       .unwrap()
   }
@@ -477,17 +478,18 @@ impl<
     S: BuildHasher + Clone + Send + Sync + Default,
   > NN<T> for ManyKnn<'a, T, S>
 {
-  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) {
+  fn insert<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error> {
     let i = prng.next_u32() % self.graphs.len() as u32;
     let mut g = self.graphs[i as usize].write().unwrap();
-    g.insert(x, prng);
+    g.insert(x, prng)
   }
 
-  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) {
+  fn delete<R: RngCore>(&mut self, x: T, prng: &mut R) -> Result<(), Error> {
     for g in &self.graphs {
       let mut g = g.write().unwrap();
-      g.delete(x, prng);
+      g.delete(x, prng)?
     }
+    Ok(())
   }
 
   fn query<R: RngCore>(
@@ -495,7 +497,7 @@ impl<
     q: &T,
     max_results: usize,
     _prng: &mut R,
-  ) -> SearchResults<T> {
+  ) -> Result<SearchResults<T>, Error> {
     let mut results = (0..self.graphs.len())
       .into_par_iter()
       .map(|i| {
@@ -505,10 +507,10 @@ impl<
           &mut rand::thread_rng(),
         )
       })
-      .reduce(SearchResults::<T>::default, |acc, e| acc.merge(&e));
+      .try_reduce(SearchResults::<T>::default, |acc, e| Ok(acc.merge(&e)))?;
 
     results.approximate_nearest_neighbors.truncate(max_results);
-    results
+    Ok(results)
   }
 }
 
@@ -611,7 +613,7 @@ fn load_texmex_to_dense_par(
     .progress_with_style(style)
     .for_each(|i| {
       let mut g = g.graphs[i as usize % g.graphs.len()].write().unwrap();
-      g.insert(ID::Base(i), &mut rand::thread_rng());
+      g.insert(ID::Base(i), &mut rand::thread_rng()).unwrap();
     });
   println!(
     "Finished building the nearest neighbors graph in {:?}",
