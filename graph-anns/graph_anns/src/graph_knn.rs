@@ -321,7 +321,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   DenseKnnGraph<T, S>
 {
   fn has_edge(&self, from: u32, to: u32) -> Result<bool, Error> {
-    Ok(self.get_edges(from)?.iter().any(|e| *e.to == to))
+    Ok(self.get_edges(from)?.any(|e| *e.to == to))
   }
 
   fn count_reciprocated_edges(&self) -> Result<usize, Error> {
@@ -429,7 +429,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
   /// Get the neighbors of u and their distances. Errors if index
   /// >= capacity or does not exist.
-  pub fn get_edges(&self, index: u32) -> Result<EdgeSlice, Error> {
+  pub fn get_edges(
+    &self,
+    index: u32,
+  ) -> Result<impl Iterator<Item = EdgeRef>, Error> {
     if index >= self.config.capacity {
       return Err(Error::InternalError(format!(
         "index {} does not exist in internal ids",
@@ -445,20 +448,14 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     let i = index * self.config.out_degree as u32;
     let j = i + self.config.out_degree as u32;
-    Ok(self.edges.slice(i as usize..j as usize))
+    Ok(self.edges.iter().skip(i as usize).take((j - i) as usize))
   }
 
   pub(crate) fn debug_get_neighbor_indices(
     &self,
     index: u32,
   ) -> Result<Vec<u32>, Error> {
-    Ok(
-      self
-        .get_edges(index)?
-        .iter()
-        .map(|e| *e.to)
-        .collect::<Vec<_>>(),
-    )
+    Ok(self.get_edges(index)?.map(|e| *e.to).collect::<Vec<_>>())
   }
 
   /// Get the neighbors of u and their distances. Errors if index
@@ -628,15 +625,14 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
   /// Print the graph, for debugging.
   #[allow(dead_code)]
-  pub fn debug_print(&self) {
+  pub fn debug_print(&self) -> Result<(), Error> {
     println!("### Adjacency list (index, distance, lambda)");
     for i in 0..self.mapping.internal_to_external_ids.len() {
       println!("Node {i}");
       println!(
         "{:#?}",
         self
-          .get_edges(i as u32)
-          .iter()
+          .get_edges(i as u32)?
           .map(|e| (e.to, e.distance, e.crowding_factor))
           .collect::<Vec<_>>()
       );
@@ -645,6 +641,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     for i in 0..self.mapping.internal_to_external_ids.len() {
       println!("Node {} {:#?}", i, self.backpointers[i]);
     }
+    Ok(())
   }
 
   /// Returns error result if graph is internally inconsistent.
@@ -661,7 +658,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
 
     for i in self.mapping.external_to_internal_ids.values() {
-      for e in self.get_edges(*i)?.iter() {
+      for e in self.get_edges(*i)? {
         if *e.to == (*i) {
           return Err(Error::InternalError(format!("Self loop at node {}", i)));
         }
@@ -677,7 +674,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       if !(IsSorted::is_sorted_by_key(
         &mut self
           .get_edges(*i)?
-          .iter()
           .map(|e| (*e.to, *e.distance, *e.crowding_factor)),
         |e| e.1,
       )) {
@@ -700,7 +696,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   }
 
   fn exists_edge(&self, u: u32, v: u32) -> Result<bool, Error> {
-    for e in self.get_edges(u)?.iter() {
+    for e in self.get_edges(u)? {
       if v == *e.to {
         return Ok(true);
       }
@@ -727,8 +723,8 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     int_id: u32,
   ) -> Result<BinaryHeap<Reverse<SearchResult<u32>>>, Error> {
     let mut ret: BinaryHeap<Reverse<SearchResult<u32>>> = BinaryHeap::new();
-    for v in self.get_edges(int_id)?.iter() {
-      for w in self.get_edges(*v.to)?.iter() {
+    for v in self.get_edges(int_id)? {
+      for w in self.get_edges(*v.to)? {
         if !self.exists_edge(int_id, *w.to)? {
           ret.push(Reverse(SearchResult {
             item: *w.to,
@@ -755,19 +751,17 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     Ok((*e.to, *e.distance))
   }
 
-  // TODO: return an iterator to avoid allocating a new vec
   fn in_and_out_neighbors(
     self: &DenseKnnGraph<T, S>,
     int_id: u32,
   ) -> Result<Vec<(u32, f32)>, Error> {
     let mut ret = Vec::new();
-    for w in self.get_edges(int_id)?.iter() {
+    for w in self.get_edges(int_id)? {
       ret.push((*w.to, *w.distance));
     }
     for w in self.backpointers[int_id as usize].iter() {
-      let w_edges = self.get_edges(*w)?;
+      let mut w_edges = self.get_edges(*w)?;
       let dist = w_edges
-        .iter()
         .find(|e| *e.to == int_id)
         .ok_or(Error::InternalError(
           "Backpointers and edges are inconsistent".to_string(),
@@ -836,7 +830,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       return Ok(f32::INFINITY);
     }
     let mut sum = 0.0;
-    for e in self.get_edges(int_id)?.iter() {
+    for e in self.get_edges(int_id)? {
       sum += *e.crowding_factor as f32;
     }
     Ok(sum / self.config.out_degree as f32)
@@ -942,7 +936,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       let sr_edges = self.get_edges(*sr_int)?;
       let r_nbrs_iter = self.backpointers[*sr_int as usize].iter().chain(
         sr_edges
-          .iter()
           .filter(|e| {
             !(ignore_occluded && *e.crowding_factor as f32 >= average_lambda)
           })
@@ -1191,7 +1184,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
           // upper bound distance, computed as dist(u,v) + dist(v,w). This
           // requires the triangle inequality to hold for the user's metric
           let referrer_nbrs: HashSet<u32> =
-            self.get_edges(*referrer)?.iter().map(|x| *x.to).collect();
+            self.get_edges(*referrer)?.map(|x| *x.to).collect();
           let mut referrer_nbrs_of_nbrs =
             self.two_hop_neighbors_and_dist_upper_bounds(*referrer)?;
 
@@ -1516,9 +1509,10 @@ mod tests {
     result
   }
 
-  fn edge_slice_to_vec(e: EdgeSlice) -> Vec<(u32, f32, u8)> {
-    e.iter()
-      .map(|e| (*e.to, *e.distance, *e.crowding_factor))
+  fn edge_iter_to_vec<'a>(
+    e: impl Iterator<Item = EdgeRef<'a>>,
+  ) -> Vec<(u32, f32, u8)> {
+    e.map(|e| (*e.to, *e.distance, *e.crowding_factor))
       .collect()
   }
 
@@ -1584,15 +1578,15 @@ mod tests {
     g.insert_vertex(2, vec![0, 1], vec![2.0, 1.0]).unwrap();
 
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(0).unwrap()),
-      [(1, 1.0, 0), (2, 2.0, 0)].as_slice()
+      edge_iter_to_vec(g.get_edges(0).unwrap()),
+      [(1, 1.0, 0), (2, 2.0, 0)]
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(1).unwrap()),
+      edge_iter_to_vec(g.get_edges(1).unwrap()),
       [(2, 1.0, 0), (0, 1.0, 0)].as_slice()
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(2).unwrap()),
+      edge_iter_to_vec(g.get_edges(2).unwrap()),
       [(1, 1.0, 0), (0, 2.0, 0)].as_slice()
     );
   }
@@ -1631,22 +1625,22 @@ mod tests {
     g.insert_vertex(2, vec![1], vec![1.0]).unwrap();
 
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(0).unwrap()),
+      edge_iter_to_vec(g.get_edges(0).unwrap()),
       [(2, 2.0, 0)].as_slice()
     );
 
     assert!(g.insert_edge_if_closer(0, 1, 1.0).unwrap());
 
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(0).unwrap()),
+      edge_iter_to_vec(g.get_edges(0).unwrap()),
       [(1, 1.0, 0)].as_slice()
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(1).unwrap()),
+      edge_iter_to_vec(g.get_edges(1).unwrap()),
       [(2, 1.0, 0)].as_slice()
     );
     assert_eq!(
-      edge_slice_to_vec(g.get_edges(2).unwrap()),
+      edge_iter_to_vec(g.get_edges(2).unwrap()),
       [(1, 1.0, 0)].as_slice()
     );
   }
