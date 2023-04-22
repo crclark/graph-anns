@@ -129,13 +129,12 @@ impl SearchStats {
 pub struct SearchResults<T> {
   /// Results of the search, in order of increasing distance from the query.
   pub approximate_nearest_neighbors: Vec<SearchResult<T>>,
-  /// All nodes visited during the search. Most users won't need this info.
-  pub visited_nodes: Vec<SearchResult<T>>,
-  /// The same info as visited_nodes, but stored as a map from internal id.
+  /// The distance to q from each visited node, but stored as a map from the
+  /// node's internal id.
   /// Used for some internal operations; probably not useful for users. This
-  /// will be empty if the data structure is small (using the brute force
+  /// will be None if the data structure is small (using the brute force
   /// algorithm), because the brute force algorithm doesn't assign internal ids.
-  pub visited_nodes_distances_to_q: HashMap<u32, (T, f32)>,
+  pub visited_nodes_distances_to_q: Option<HashMap<u32, f32>>,
   /// Statistics about the execution of the search.
   /// This will be None for small graphs, because the brute force algorithm
   /// doesn't collect statistics.
@@ -161,14 +160,25 @@ impl<T: Clone + Eq + std::hash::Hash> SearchResults<T> {
     merged
       .approximate_nearest_neighbors
       .sort_by(|a, b| a.dist.total_cmp(&b.dist));
-    merged.visited_nodes.extend(other.visited_nodes.clone());
-    merged
-      .visited_nodes
-      .sort_by(|a, b| a.internal_id.cmp(&b.internal_id));
-    merged.visited_nodes.dedup_by_key(|x| x.internal_id);
-    merged
-      .visited_nodes_distances_to_q
-      .extend(other.visited_nodes_distances_to_q.clone());
+    merged.visited_nodes_distances_to_q = {
+      match (
+        &self.visited_nodes_distances_to_q,
+        &other.visited_nodes_distances_to_q,
+      ) {
+        (Some(m1), Some(m2)) => {
+          let mut merged_map = m1.clone();
+          for (k, v) in m2.iter() {
+            if !merged_map.contains_key(k) {
+              merged_map.insert(*k, *v);
+            }
+          }
+          Some(merged_map)
+        }
+        (Some(m1), None) => Some(m1.clone()),
+        (None, Some(m2)) => Some(m2.clone()),
+        (None, None) => None,
+      }
+    };
     merged.search_stats = match (&self.search_stats, &other.search_stats) {
       (Some(s1), Some(s2)) => Some(s1.merge(s2)),
       (Some(s1), None) => Some(*s1),
@@ -183,8 +193,7 @@ impl<T> Default for SearchResults<T> {
   fn default() -> Self {
     Self {
       approximate_nearest_neighbors: Vec::new(),
-      visited_nodes: Vec::new(),
-      visited_nodes_distances_to_q: HashMap::new(),
+      visited_nodes_distances_to_q: None,
       search_stats: None,
     }
   }
