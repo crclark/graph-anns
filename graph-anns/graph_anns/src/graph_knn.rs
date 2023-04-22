@@ -781,22 +781,12 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     self: &mut DenseKnnGraph<T, S>,
     q: T,
     q_int: u32,
-    visited_nodes: &Vec<SearchResult<T>>,
-    visited_nodes_distances_to_q: &HashMap<u32, (T, f32)>,
+    visited_nodes_distances_to_q: &HashMap<u32, f32>,
     dist_fn: &dyn Fn(&T, &T) -> f32,
   ) -> Result<(), Error> {
     let mut w = VecDeque::new();
-    for SearchResult {
-      item: _,
-      internal_id,
-      dist,
-      ..
-    } in visited_nodes
-    {
-      let internal_id: u32 = internal_id.ok_or(Error::InternalError(
-        "Impossible happened: internal id was None inside rrnp".to_string(),
-      ))?;
-      w.push_back((internal_id, 0, dist));
+    for (internal_id, dist) in visited_nodes_distances_to_q {
+      w.push_back((*internal_id, 0, dist));
     }
 
     let mut already_rrnped = HashSet::new();
@@ -854,7 +844,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
       BinaryHeap::new();
     let mut visited = HashSet::<u32>::new();
-    let mut visited_distances: HashMap<u32, (T, f32)> = HashMap::default();
+    let mut visited_distances: HashMap<u32, f32> = HashMap::default();
     // TODO: disable stat tracking on insertion, make it optional elsewhere.
     // tracks the starting node of the search path for each node traversed.
     let mut largest_distance_improvement_single_hop = f32::NEG_INFINITY;
@@ -874,7 +864,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         max_r_dist = r_dist;
       }
       visited.insert(*r_int);
-      visited_distances.insert(*r_int, (r_ext.clone(), r_dist));
+      visited_distances.insert(*r_int, r_dist);
       r_min_heap.push(Reverse(SearchResult::new(
         r_ext.clone(),
         Some(*r_int),
@@ -947,7 +937,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         if !visited.contains(e) {
           visited.insert(*e);
           let e_dist = compute_distance(q, e_ext);
-          visited_distances.insert(*e, (e_ext.clone(), e_dist));
+          visited_distances.insert(*e, e_dist);
 
           if e_dist < f.dist || q_max_heap.len() < max_results {
             let hop_distance_improvement = -(e_dist - sr.dist);
@@ -984,18 +974,9 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     }
 
     // construct the visited vec from visited and visited_distances
-    let mut visited_vec: Vec<SearchResult<T>> = Vec::new();
+    let mut visited_vec: Vec<u32> = Vec::new();
     for i_int in visited {
-      let (i_ext, i_dist) = visited_distances
-        .get(&i_int)
-        .ok_or(Error::InternalError("missing internal id".to_string()))?;
-      visited_vec.push(SearchResult::new(
-        i_ext.clone(),
-        Some(i_int),
-        *i_dist,
-        0,
-        0,
-      ));
+      visited_vec.push(i_int);
     }
     let approximate_nearest_neighbors = q_max_heap.into_sorted_vec();
     let nearest_neighbor =
@@ -1012,8 +993,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     Ok(SearchResults {
       approximate_nearest_neighbors,
-      visited_nodes: visited_vec,
-      visited_nodes_distances_to_q: visited_distances,
+      visited_nodes_distances_to_q: Some(visited_distances),
       search_stats: Some(SearchStats {
         num_distance_computations,
         distance_from_nearest_starting_point: min_r_dist,
@@ -1095,7 +1075,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     //TODO: API for using internal ids, for improved speed.
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
-      visited_nodes,
       visited_nodes_distances_to_q,
       search_stats: _,
     } = self.query_internal(
@@ -1103,6 +1082,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       self.config.out_degree as usize,
       dist_fn,
       false,
+    )?;
+
+    let visited_nodes_distances_to_q = visited_nodes_distances_to_q.ok_or(
+      Error::InternalError("missing visited nodes in insert".to_string()),
     )?;
 
     let (neighbors, dists): (Vec<Result<u32, Error>>, Vec<f32>) =
@@ -1120,15 +1103,8 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     let q_int = self.mapping.insert(&q)?;
     self.insert_vertex(q_int, neighbors, dists)?;
 
-    for SearchResult {
-      item: _,
-      internal_id: r_int,
-      dist: r_dist,
-      ..
-    } in &visited_nodes
-    {
-      let r_int =
-        r_int.ok_or(Error::InternalError("no internal id".to_string()))?;
+    for (r_int, r_dist) in &visited_nodes_distances_to_q {
+      let r_int = *r_int;
       // TODO: collect stats on how often is_inserted is true and how many
       // times we call insert_edge_if_closer. This could be a big waste of time.
       let is_inserted = self.insert_edge_if_closer(r_int, q_int, *r_dist)?;
@@ -1138,13 +1114,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       }
     }
     if self.config.use_rrnp {
-      self.rrnp(
-        q,
-        q_int,
-        &visited_nodes,
-        &visited_nodes_distances_to_q,
-        dist_fn,
-      )?;
+      self.rrnp(q, q_int, &visited_nodes_distances_to_q, dist_fn)?;
     }
     self.maybe_insert_starting_point(q_int, prng);
     Ok(())
@@ -1317,10 +1287,10 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   }
 }
 
-fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
+fn apply_lgd(
   r_edges: &mut EdgeSliceMut,
   q_int: u32,
-  visited_node_distances_to_q: &HashMap<u32, (T, f32)>,
+  visited_node_distances_to_q: &HashMap<u32, f32>,
 ) -> Result<(), Error> {
   let q_ix =
     r_edges
@@ -1356,16 +1326,16 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
         "missing edge in apply_lgd".to_string(),
       ))?
       .distance;
-    let s_q_dist = visited_node_distances_to_q.get(&s_int).map(|d| d.1);
+    let s_q_dist = visited_node_distances_to_q.get(&s_int);
 
     match s_q_dist {
       Some(s_q_dist) => {
         // rule 1 from the paper
-        if s_r_dist < q_r_dist && s_q_dist >= q_r_dist {
+        if s_r_dist < q_r_dist && s_q_dist >= &q_r_dist {
           continue;
         }
         // rule 2 from the paper
-        else if s_r_dist < q_r_dist && s_q_dist < q_r_dist {
+        else if s_r_dist < q_r_dist && s_q_dist < &q_r_dist {
           *r_edges
             .get_mut(q_ix)
             .ok_or(Error::InternalError(
@@ -1374,7 +1344,7 @@ fn apply_lgd<T: Clone + Eq + std::hash::Hash>(
             .crowding_factor += 1;
         }
         // rule 3 from the paper: s_r_dist > q_r_dist, q occludes s
-        else if s_q_dist < s_r_dist {
+        else if s_q_dist < &s_r_dist {
           *r_edges
             .get_mut(s_ix)
             .ok_or(Error::InternalError(
