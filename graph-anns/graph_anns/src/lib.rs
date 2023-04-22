@@ -93,7 +93,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::max;
 use std::collections::binary_heap::BinaryHeap;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::hash::BuildHasher;
@@ -193,8 +192,7 @@ impl<T: Clone + Eq + std::hash::Hash> ExhaustiveKnn<T> {
     SearchResults {
       approximate_nearest_neighbors: nearest_neighbors_max_dist_heap
         .into_sorted_vec(),
-      visited_nodes,
-      visited_nodes_distances_to_q: HashMap::new(),
+      visited_nodes_distances_to_q: None,
       search_stats: None,
     }
   }
@@ -506,6 +504,7 @@ mod tests {
   #![allow(clippy::unwrap_used)]
   extern crate nohash_hasher;
   extern crate ordered_float;
+  use std::collections::HashMap;
   use std::{collections::hash_map::RandomState, hash::BuildHasherDefault};
 
   use self::nohash_hasher::NoHashHasher;
@@ -517,7 +516,8 @@ mod tests {
   type Nhh = BuildHasherDefault<NoHashHasher<u32>>;
 
   // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
-  // PrimitiveToF32 mess is necessary. .into() is much slower.
+  // PrimitiveToF32 mess is necessary. .into() is much slower. Verify that this
+  // is still the case.
 
   pub trait PrimitiveToF32 {
     fn tof32(self) -> f32;
@@ -786,34 +786,11 @@ mod tests {
           search_depth: 0,
         },
       ],
-      visited_nodes: vec![
-        SearchResult {
-          item: 1,
-          internal_id: Some(1),
-          dist: 1.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-        SearchResult {
-          item: 2,
-          internal_id: Some(2),
-          dist: 2.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-        SearchResult {
-          item: 3,
-          internal_id: Some(3),
-          dist: 3.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-      ],
-      visited_nodes_distances_to_q: HashMap::from([
-        (1, (1, 1.0)),
-        (2, (2, 2.0)),
-        (3, (3, 3.0)),
-      ]),
+      visited_nodes_distances_to_q: Some(HashMap::from([
+        (1, 1.0),
+        (2, 2.0),
+        (3, 3.0),
+      ])),
       search_stats: None,
     };
     let sr2: SearchResults<u32> = SearchResults {
@@ -833,34 +810,11 @@ mod tests {
           search_depth: 0,
         },
       ],
-      visited_nodes: vec![
-        SearchResult {
-          item: 1,
-          internal_id: Some(1),
-          dist: 1.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-        SearchResult {
-          item: 3,
-          internal_id: Some(3),
-          dist: 3.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-        SearchResult {
-          item: 4,
-          internal_id: Some(4),
-          dist: 4.0,
-          search_root_ancestor: 0,
-          search_depth: 0,
-        },
-      ],
-      visited_nodes_distances_to_q: HashMap::from([
-        (1, (1, 1.0)),
-        (3, (3, 3.0)),
-        (4, (4, 4.0)),
-      ]),
+      visited_nodes_distances_to_q: Some(HashMap::from([
+        (1, 1.0),
+        (3, 3.0),
+        (4, 4.0),
+      ])),
       search_stats: None,
     };
 
@@ -899,46 +853,8 @@ mod tests {
       ]
     );
     assert_eq!(
-      sr3.visited_nodes,
-      vec![
-        SearchResult {
-          item: 1,
-          internal_id: Some(1),
-          dist: 1.0,
-          search_root_ancestor: 0,
-          search_depth: 0
-        },
-        SearchResult {
-          item: 2,
-          internal_id: Some(2),
-          dist: 2.0,
-          search_root_ancestor: 0,
-          search_depth: 0
-        },
-        SearchResult {
-          item: 3,
-          internal_id: Some(3),
-          dist: 3.0,
-          search_root_ancestor: 0,
-          search_depth: 0
-        },
-        SearchResult {
-          item: 4,
-          internal_id: Some(4),
-          dist: 4.0,
-          search_root_ancestor: 0,
-          search_depth: 0
-        },
-      ],
-    );
-    assert_eq!(
       sr3.visited_nodes_distances_to_q,
-      HashMap::from([
-        (1, (1, 1.0)),
-        (2, (2, 2.0)),
-        (3, (3, 3.0)),
-        (4, (4, 4.0)),
-      ]),
+      Some(HashMap::from([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0),])),
     );
   }
 }
