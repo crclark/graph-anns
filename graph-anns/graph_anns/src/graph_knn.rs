@@ -909,16 +909,16 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       let Reverse(sr) = r_min_heap
         .pop()
         .ok_or(Error::InternalError("r_min_heap is empty".to_string()))?;
-      let f = {
+      let f_dist = {
         q_max_heap
           .peek()
           .ok_or(Error::InternalError("q_max_heap is empty".to_string()))?
-          .clone()
+          .dist
       };
       let sr_int = &sr
         .internal_id
         .ok_or(Error::InternalError("No internal id".to_string()))?;
-      if sr.dist > f.dist {
+      if sr.dist > f_dist {
         break;
       }
 
@@ -939,7 +939,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
           let e_dist = compute_distance(q, e_ext);
           visited_distances.insert(*e, e_dist);
 
-          if e_dist < f.dist || q_max_heap.len() < max_results {
+          if e_dist < f_dist || q_max_heap.len() < max_results {
             let hop_distance_improvement = -(e_dist - sr.dist);
             if hop_distance_improvement
               > largest_distance_improvement_single_hop
