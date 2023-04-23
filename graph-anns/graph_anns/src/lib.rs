@@ -38,7 +38,7 @@
 //!
 //! use std::collections::hash_map::RandomState;
 //!
-//! let dist_fn = &|x: &Vec<NotNan<f32>>, y: &Vec<NotNan<f32>>| {
+//! let dist_fn = &|x: &&Vec<NotNan<f32>>, y: &&Vec<NotNan<f32>>| {
 //! let mut sum = 0.0;
 //! for i in 0..x.len() {
 //!   sum += (x[i] - y[i]).powi(2);
@@ -52,7 +52,7 @@
 //! .use_lgd(true)
 //! .build();
 //!
-//! let mut g: Knn<Vec<NotNan<f32>>, RandomState> = Knn::new(conf, dist_fn);
+//! let mut g: Knn<&Vec<NotNan<f32>>, RandomState> = Knn::new(conf, dist_fn);
 //!
 //! let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 //!
@@ -63,22 +63,24 @@
 //! NotNan::new(4f32).unwrap(),
 //! ];
 //!
-//! g.insert(example_vec.clone(), &mut prng).unwrap();
+//! let query_vec = vec![
+//!   NotNan::new(34f32).unwrap(),
+//!   NotNan::new(5f32).unwrap(),
+//!   NotNan::new(53f32).unwrap(),
+//!   NotNan::new(312f32).unwrap(),
+//! ];
+//!
+//! g.insert(&example_vec, &mut prng).unwrap();
 //!
 //! let SearchResults {
 //! approximate_nearest_neighbors: nearest_neighbors,
 //! ..
 //! } = g.query(
-//! &vec![
-//!   NotNan::new(34f32).unwrap(),
-//!   NotNan::new(5f32).unwrap(),
-//!   NotNan::new(53f32).unwrap(),
-//!   NotNan::new(312f32).unwrap(),
-//! ],
+//! &&query_vec,
 //! 1,
 //! &mut prng,
 //! ).unwrap();
-//! assert_eq!(nearest_neighbors[0].item, example_vec);
+//! assert_eq!(*nearest_neighbors[0].item, example_vec);
 //! ```
 extern crate bincode;
 extern crate is_sorted;
