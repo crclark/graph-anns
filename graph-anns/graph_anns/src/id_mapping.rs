@@ -4,6 +4,10 @@ use std::hash::BuildHasher;
 
 use crate::error::Error;
 
+// TODO: don't store T twice. It's fine in the tests we've been doing where
+// T is a u32, but it's not great in general. Store a reference to T in one
+// of the two data structures (probably the hashmap?).
+
 /// Maps from the user's chosen ID type to our internal u32 ids that are used
 /// within the core search functions to keep things fast and compact.
 /// Ideally, we should translate to and from user ids at the edges of
