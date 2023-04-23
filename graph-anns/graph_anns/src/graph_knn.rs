@@ -915,7 +915,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     let mut q_max_heap: BinaryHeap<IntSearchResult> = BinaryHeap::new();
     let mut r_min_heap: BinaryHeap<Reverse<IntSearchResult>> =
       BinaryHeap::new();
-    let mut visited = HashSet::<u32>::new();
     let mut visited_distances: HashMap<u32, f32> = HashMap::default();
     // TODO: disable stat tracking on insertion, make it optional elsewhere.
     // tracks the starting node of the search path for each node traversed.
@@ -935,7 +934,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       if r_dist > max_r_dist {
         max_r_dist = r_dist;
       }
-      visited.insert(*r_int);
       visited_distances.insert(*r_int, r_dist);
       r_min_heap.push(Reverse(IntSearchResult::new(*r_int, r_dist, *r_int, 0)));
       match q_max_heap.peek() {
@@ -987,8 +985,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
       for e in r_nbrs_iter {
         let e_ext = self.mapping.int_to_ext(*e)?;
-        if !visited.contains(e) {
-          visited.insert(*e);
+        if !visited_distances.contains_key(e) {
           let e_dist = compute_distance(q, e_ext);
           visited_distances.insert(*e, e_dist);
 
@@ -1024,11 +1021,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       }
     }
 
-    // construct the visited vec from visited and visited_distances
-    let mut visited_vec: Vec<u32> = Vec::new();
-    for i_int in visited {
-      visited_vec.push(i_int);
-    }
     let mut approximate_nearest_neighbors = Vec::new();
     for isr in q_max_heap.into_sorted_vec() {
       let sr = self.to_search_result(isr)?;
@@ -1045,7 +1037,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     let nearest_neighbor_path_length = nearest_neighbor.search_depth as usize;
 
-    let num_visited = visited_vec.len();
+    let num_visited = visited_distances.len();
 
     Ok(SearchResults {
       approximate_nearest_neighbors,

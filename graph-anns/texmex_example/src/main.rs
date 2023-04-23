@@ -229,7 +229,16 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
     }
     write_search_stats(&search_stats, found_closest, line_writer, args.clone());
   }
-  println!("Finished recall@{} in {:?}", r, start_recall.elapsed());
+
+  let qps = query_vecs.num_rows as f32 / start_recall.elapsed().as_secs_f32();
+
+  println!(
+    "Finished recall@{} for {} queries in {:?} for {} qps",
+    r,
+    query_vecs.num_rows,
+    start_recall.elapsed(),
+    qps
+  );
 
   num_correct as f32 / query_vecs.num_rows as f32
 }
