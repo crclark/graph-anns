@@ -17,7 +17,7 @@ extern crate tinyset;
 use clap::Parser;
 use graph_anns::Error;
 use graph_anns::*;
-use indicatif::{ParallelProgressIterator, ProgressStyle};
+use indicatif::{ParallelProgressIterator, ProgressIterator, ProgressStyle};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
@@ -204,9 +204,10 @@ fn recall_at_r<G: NN<ID>, R: RngCore>(
   line_writer: &mut LineWriter<File>,
   args: Args,
 ) -> f32 {
+  println!("Starting recall@{}...", r);
   let start_recall = Instant::now();
   let mut num_correct = 0;
-  for i in 0..query_vecs.num_rows {
+  for i in (0..query_vecs.num_rows).progress() {
     let query = ID::Query(i as u32);
     let SearchResults {
       approximate_nearest_neighbors,
@@ -620,7 +621,7 @@ fn load_texmex_to_dense_par(
     start_inserting.elapsed()
   );
 
-  println!("Graph size: {:?}", g.debug_size_stats());
+  //println!("Graph size: {:?}", g.debug_size_stats());
   g
 }
 

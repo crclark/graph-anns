@@ -24,6 +24,58 @@ const DEFAULT_LAMBDA: u8 = 0;
 const DEFAULT_NUM_SEARCHERS: u32 = 5;
 const DEFAULT_OUT_DEGREE: u8 = 5;
 
+/// Stores search result info. Used internally in query_internal, and is
+/// transformed into a SearchResult before being returned to the user.
+#[derive(Debug, Clone, Copy)]
+struct IntSearchResult {
+  /// The internal identifier for this item within the graph.
+  pub internal_id: u32,
+  /// The distance from the query point to this item.
+  pub dist: f32,
+
+  /// The internal identifier of the node that was the root of the search for
+  /// this item.
+  pub(crate) search_root_ancestor: u32,
+  /// The depth of the search for this item.
+  pub(crate) search_depth: u32,
+}
+
+impl IntSearchResult {
+  pub(crate) fn new(
+    internal_id: u32,
+    dist: f32,
+    search_root_ancestor: u32,
+    search_depth: u32,
+  ) -> IntSearchResult {
+    Self {
+      internal_id,
+      dist,
+      search_root_ancestor,
+      search_depth,
+    }
+  }
+}
+
+impl PartialEq for IntSearchResult {
+  fn eq(&self, other: &Self) -> bool {
+    self.dist == other.dist
+  }
+}
+
+impl Eq for IntSearchResult {}
+
+impl PartialOrd for IntSearchResult {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    self.dist.partial_cmp(&other.dist)
+  }
+}
+
+impl Ord for IntSearchResult {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.dist.total_cmp(&other.dist)
+  }
+}
+
 /// Configuration for the graph. Use [KnnGraphConfigBuilder] to construct.
 #[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct KnnGraphConfig<S: BuildHasher + Clone + Default> {
@@ -826,6 +878,20 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     Ok(sum / self.config.out_degree as f32)
   }
 
+  fn to_search_result(
+    &self,
+    sr: IntSearchResult,
+  ) -> Result<SearchResult<T>, Error> {
+    let item = self.mapping.int_to_ext(sr.internal_id)?;
+    Ok(SearchResult {
+      item: item.clone(),
+      internal_id: Some(sr.internal_id),
+      dist: sr.dist,
+      search_root_ancestor: sr.search_root_ancestor,
+      search_depth: sr.search_depth,
+    })
+  }
+
   fn query_internal(
     &self,
     q: &T,
@@ -840,8 +906,8 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       num_distance_computations += 1;
       dist
     };
-    let mut q_max_heap: BinaryHeap<SearchResult<T>> = BinaryHeap::new();
-    let mut r_min_heap: BinaryHeap<Reverse<SearchResult<T>>> =
+    let mut q_max_heap: BinaryHeap<IntSearchResult> = BinaryHeap::new();
+    let mut r_min_heap: BinaryHeap<Reverse<IntSearchResult>> =
       BinaryHeap::new();
     let mut visited = HashSet::<u32>::new();
     let mut visited_distances: HashMap<u32, f32> = HashMap::default();
@@ -865,34 +931,16 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       }
       visited.insert(*r_int);
       visited_distances.insert(*r_int, r_dist);
-      r_min_heap.push(Reverse(SearchResult::new(
-        r_ext.clone(),
-        Some(*r_int),
-        r_dist,
-        *r_int,
-        0,
-      )));
+      r_min_heap.push(Reverse(IntSearchResult::new(*r_int, r_dist, *r_int, 0)));
       match q_max_heap.peek() {
         None => {
-          q_max_heap.push(SearchResult::new(
-            r_ext.clone(),
-            Some(*r_int),
-            r_dist,
-            *r_int,
-            0,
-          ));
+          q_max_heap.push(IntSearchResult::new(*r_int, r_dist, *r_int, 0));
           // NOTE: pseudocode has a bug: R.insert(r) at both line 2 and line 8
           // We are skipping it here since we did it above.
         }
         Some(f) => {
           if r_dist < f.dist || q_max_heap.len() < max_results {
-            q_max_heap.push(SearchResult::new(
-              r_ext.clone(),
-              Some(*r_int),
-              r_dist,
-              *r_int,
-              0,
-            ));
+            q_max_heap.push(IntSearchResult::new(*r_int, r_dist, *r_int, 0));
           }
         }
       }
@@ -915,9 +963,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
           .ok_or(Error::InternalError("q_max_heap is empty".to_string()))?
           .dist
       };
-      let sr_int = &sr
-        .internal_id
-        .ok_or(Error::InternalError("No internal id".to_string()))?;
+      let sr_int = &sr.internal_id;
       if sr.dist > f_dist {
         break;
       }
@@ -954,16 +1000,14 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
                 hop_distance_improvement;
             }
             // TODO: use CoW to reduce duplicated objects
-            q_max_heap.push(SearchResult::new(
-              e_ext.clone(),
-              Some(*e),
+            q_max_heap.push(IntSearchResult::new(
+              *e,
               e_dist,
               sr.search_root_ancestor,
               sr.search_depth + 1,
             ));
-            r_min_heap.push(Reverse(SearchResult::new(
-              e_ext.clone(),
-              Some(*e),
+            r_min_heap.push(Reverse(IntSearchResult::new(
+              *e,
               e_dist,
               sr.search_root_ancestor,
               sr.search_depth + 1,
@@ -978,7 +1022,12 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     for i_int in visited {
       visited_vec.push(i_int);
     }
-    let approximate_nearest_neighbors = q_max_heap.into_sorted_vec();
+    let mut approximate_nearest_neighbors = Vec::new();
+    for isr in q_max_heap.into_sorted_vec() {
+      let sr = self.to_search_result(isr)?;
+      approximate_nearest_neighbors.push(sr);
+    }
+    //q_max_heap.into_sorted_vec();
     let nearest_neighbor =
       approximate_nearest_neighbors
         .last()
