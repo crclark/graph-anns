@@ -1003,7 +1003,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
               smallest_distance_improvement_single_hop =
                 hop_distance_improvement;
             }
-            // TODO: use CoW to reduce duplicated objects
+
             q_max_heap.push(IntSearchResult::new(
               *e,
               e_dist,
@@ -1026,7 +1026,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       let sr = self.to_search_result(isr)?;
       approximate_nearest_neighbors.push(sr);
     }
-    //q_max_heap.into_sorted_vec();
+
     let nearest_neighbor =
       approximate_nearest_neighbors
         .last()
