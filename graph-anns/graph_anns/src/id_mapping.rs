@@ -1,43 +1,48 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{MapAccess, Visitor};
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::hash::{BuildHasher, Hash};
+use std::sync::Arc;
 
 use crate::error::Error;
 
-// TODO: don't store T twice. It's fine in the tests we've been doing where
-// T is a u32, but it's not great in general. Store a reference to T in one
-// of the two data structures (probably the hashmap?).
+use std::marker::PhantomData;
+use std::{fmt, mem};
 
-/// Maps from the user's chosen ID type to our internal u32 ids that are used
-/// within the core search functions to keep things fast and compact.
-/// Ideally, we should translate to and from user ids at the edges of
-/// performance-critical code. In practice, doing so may be difficult, since the
-/// user's distance callback is passed external ids (the user's IDs).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone)]
 pub struct IdMapping<T: Eq + std::hash::Hash, S: BuildHasher + Default> {
-  capacity: u32,
+  capacity: usize,
   next_int_id: u32,
-  pub internal_to_external_ids: Vec<Option<T>>,
-  #[serde(bound(
-    serialize = "HashMap<T, u32, S>: Serialize",
-    deserialize = "HashMap<T, u32, S>: Deserialize<'de>"
-  ))]
-  pub external_to_internal_ids: HashMap<T, u32, S>,
+  // TODO: make these private with proper abstractions
+  pub internal_to_external_ids: Vec<Option<Arc<T>>>,
+  pub external_to_internal_ids: HashMap<Arc<T>, u32, S>,
   pub deleted: Vec<u32>,
 }
 
 impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
   IdMapping<T, S>
 {
-  pub fn with_capacity_and_hasher(capacity: u32, hash_builder: S) -> Self {
-    let mut internal_to_external_ids = Vec::with_capacity(capacity as usize);
+  pub fn ext_ids_iter(&self) -> impl Iterator<Item = &T> {
+    self.external_to_internal_ids.keys().map(|x| x.as_ref())
+  }
+
+  pub fn ext_int_iter(&self) -> impl Iterator<Item = (&T, u32)> {
+    self
+      .external_to_internal_ids
+      .iter()
+      .map(|(x, i)| (x.as_ref(), *i))
+  }
+
+  pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
+    let mut internal_to_external_ids = Vec::with_capacity(capacity);
     for _ in 0..capacity {
       internal_to_external_ids.push(None);
     }
     let external_to_internal_ids =
-      HashMap::with_capacity_and_hasher(capacity as usize, hash_builder);
+      HashMap::with_capacity_and_hasher(capacity, hash_builder);
 
-    let deleted = Vec::<u32>::new();
+    let deleted = Vec::new();
     IdMapping {
       capacity,
       next_int_id: 0,
@@ -47,26 +52,35 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
     }
   }
 
-  pub fn insert(&mut self, x: &T) -> Result<u32, Error> {
-    match self.external_to_internal_ids.get(x) {
+  pub fn insert(&mut self, x: T) -> Result<u32, Error> {
+    let x = Arc::new(x);
+    match self.external_to_internal_ids.get(&x) {
       Some(id) => Ok(*id),
       None => {
         let x_int = match self.deleted.pop() {
           None => self.next_int_id,
           Some(i) => i,
         };
-        if x_int > self.capacity {
+        if x_int as usize >= self.capacity {
           return Err(Error::CapacityExceeded);
         }
         self.next_int_id += 1;
 
-        // TODO: we are storing two clones of x. Replace with a bidirectional
-        // map or something to reduce memory usage.
-        self.internal_to_external_ids[x_int as usize] = Some(x.clone());
         self.external_to_internal_ids.insert(x.clone(), x_int);
+        self.internal_to_external_ids[x_int as usize] = Some(x);
         Ok(x_int)
       }
     }
+  }
+
+  /// Insert with a specified internal id. Only used for serde.
+  fn insert_ext_int(&mut self, x: T, i: u32) {
+    #![allow(clippy::unwrap_used)]
+    self.internal_to_external_ids[i as usize] = Some(Arc::new(x));
+    self.external_to_internal_ids.insert(
+      Arc::clone(self.internal_to_external_ids[i as usize].as_ref().unwrap()),
+      i,
+    );
   }
 
   pub fn int_to_ext(&self, x: u32) -> Result<&T, Error> {
@@ -79,18 +93,287 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
     }
   }
 
-  pub fn ext_to_int(&self, x: &T) -> Result<&u32, Error> {
+  pub fn ext_to_int(&self, x: &T) -> Result<u32, Error> {
     match self.external_to_internal_ids.get(x) {
       None => Err(Error::InternalError("unknown external id".to_string())),
-      Some(i) => Ok(i),
+      Some(i) => Ok(*i),
     }
   }
 
-  pub fn delete(&mut self, x: &T) -> Result<u32, Error> {
-    let x_int = *self.ext_to_int(x)?;
+  pub fn delete(&mut self, x_int: u32) -> Result<u32, Error> {
+    let x =
+      mem::replace(&mut self.internal_to_external_ids[x_int as usize], None);
+    let x = x.ok_or_else(|| {
+      Error::InternalError(format!("unknown external id: {}", x_int))
+    })?;
     self.deleted.push(x_int);
-    self.internal_to_external_ids[x_int as usize] = None;
-    self.external_to_internal_ids.remove(x);
+    self.external_to_internal_ids.remove(x.as_ref());
     Ok(x_int)
+  }
+
+  pub fn consume_and_get_exts(mut self) -> Result<Vec<T>, Error> {
+    self.external_to_internal_ids.clear();
+
+    self
+      .internal_to_external_ids
+      .drain(..)
+      .filter_map(|x| x)
+      .map(|x| match Arc::<T>::try_unwrap(x) {
+        Ok(x) => Ok(x),
+        Err(_) => Err(Error::InternalError(
+          "internal_to_external_ids still has references".to_string(),
+        )),
+      })
+      .collect()
+  }
+
+  pub fn len(&self) -> usize {
+    self.external_to_internal_ids.len()
+  }
+}
+
+impl<T, S> Serialize for IdMapping<T, S>
+where
+  T: Clone + Eq + Hash + Serialize,
+  S: BuildHasher + Default,
+{
+  fn serialize<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
+  where
+    Ser: serde::Serializer,
+  {
+    let mut state = serializer.serialize_struct("IdMap", 3)?;
+    state.serialize_field("capacity", &self.capacity)?;
+    state.serialize_field("next_int_id", &self.next_int_id)?;
+    state.serialize_field(
+      "internal_to_external_ids",
+      &SerializeSeqAsPairs(&self.internal_to_external_ids),
+    )?;
+    state.end()
+  }
+}
+
+struct SerializeSeqAsPairs<'a, T>(&'a Vec<Option<Arc<T>>>);
+
+impl<'a, T: Serialize> Serialize for SerializeSeqAsPairs<'a, T> {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: serde::Serializer,
+  {
+    let mut seq = serializer.serialize_seq(None)?;
+    for (i, opt) in self.0.iter().enumerate() {
+      if let Some(rc) = opt {
+        seq.serialize_element(&(i as u32, &**rc))?;
+      }
+    }
+    seq.end()
+  }
+}
+
+impl<'de, T, S> Deserialize<'de> for IdMapping<T, S>
+where
+  T: Clone + Eq + Hash + Deserialize<'de>,
+  S: BuildHasher + Default,
+{
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    deserializer.deserialize_struct(
+      "IdMap",
+      &["capacity", "next_int_id", "internal_to_external_ids"],
+      IdMapVisitor(PhantomData),
+    )
+  }
+}
+
+struct IdMapVisitor<T: Clone + Eq + Hash, S: BuildHasher + Default>(
+  PhantomData<fn() -> IdMapping<T, S>>,
+);
+
+impl<'de, T, S> Visitor<'de> for IdMapVisitor<T, S>
+where
+  T: Clone + Eq + Hash + Deserialize<'de>,
+  S: BuildHasher + Default,
+{
+  type Value = IdMapping<T, S>;
+
+  fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    formatter.write_str("struct IdMap")
+  }
+
+  fn visit_map<V>(self, mut map: V) -> Result<IdMapping<T, S>, V::Error>
+  where
+    V: MapAccess<'de>,
+  {
+    let mut capacity = None;
+    let mut next_int_id = None;
+    let mut i_to_e_and_e_to_i: Option<(
+      Vec<Option<Arc<T>>>,
+      HashMap<Arc<T>, u32, _>,
+    )> = None;
+    while let Some(key) = map.next_key()? {
+      match key {
+        "capacity" => {
+          if capacity.is_some() {
+            return Err(serde::de::Error::duplicate_field("capacity"));
+          }
+          capacity = Some(map.next_value()?);
+        }
+        "next_int_id" => {
+          if next_int_id.is_some() {
+            return Err(serde::de::Error::duplicate_field("next_int_id"));
+          }
+          next_int_id = Some(map.next_value()?);
+        }
+        "internal_to_external_ids" => {
+          if i_to_e_and_e_to_i.is_some() {
+            return Err(serde::de::Error::duplicate_field(
+              "internal_to_external_ids",
+            ));
+          }
+          // TODO: duplicate vecs -> 2x memory. Fix.
+          let pairs: Vec<(u32, T)> = map.next_value()?;
+          let mut i_to_e = Vec::with_capacity(capacity.unwrap());
+          i_to_e.resize(pairs.len(), None);
+          let mut hash_map = HashMap::default();
+          for (i, t) in pairs {
+            let rc = Arc::new(t);
+            i_to_e[i as usize] = Some(Arc::clone(&rc));
+            hash_map.insert(rc, i);
+          }
+          i_to_e_and_e_to_i = Some((i_to_e, hash_map));
+        }
+        _ => {
+          return Err(serde::de::Error::unknown_field(
+            key,
+            &["capacity", "next_int_id", "internal_to_external_ids"],
+          ))
+        }
+      }
+    }
+
+    let capacity =
+      capacity.ok_or_else(|| serde::de::Error::missing_field("capacity"))?;
+    let next_int_id = next_int_id
+      .ok_or_else(|| serde::de::Error::missing_field("next_int_id"))?;
+    let (internal_to_external_ids, external_to_internal_ids) =
+      i_to_e_and_e_to_i.ok_or_else(|| {
+        serde::de::Error::missing_field("internal_to_external_ids")
+      })?;
+
+    // TODO: do this in the original pass over the serialized data, above.
+    // Reconstruct deleted Vec
+    let mut deleted = Vec::new();
+    for (i, item) in internal_to_external_ids.iter().enumerate().take(capacity)
+    {
+      if item.is_none() {
+        deleted.push(i as u32);
+      }
+    }
+
+    Ok(IdMapping {
+      capacity,
+      next_int_id,
+      internal_to_external_ids,
+      external_to_internal_ids,
+      deleted,
+    })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #![allow(clippy::unwrap_used)]
+  extern crate serde_json;
+
+  use super::*;
+  use std::{
+    collections::hash_map::{DefaultHasher, RandomState},
+    hash::Hasher,
+  };
+
+  #[test]
+  fn same_hash_borrowed_owned() {
+    let my_str = "test1".to_string();
+    let th = &Arc::new(&my_str);
+    let mut h = DefaultHasher::new();
+    th.hash(&mut h);
+    let th = &Arc::clone(th);
+    let mut h2 = DefaultHasher::new();
+    th.hash(&mut h2);
+    assert_eq!(h.finish(), h2.finish());
+  }
+
+  //TODO: delete; don't test std
+  #[test]
+  fn same_hash_for_same_string_contents() {
+    let my_str = "test1".to_string();
+    let my_str2 = "test1".to_string();
+    let th = Arc::new(&my_str);
+    let mut h = DefaultHasher::new();
+    th.hash(&mut h);
+    let th = Arc::new(&my_str2);
+    let mut h2 = DefaultHasher::new();
+    th.hash(&mut h2);
+    assert_eq!(h.finish(), h2.finish());
+  }
+
+  #[test]
+  fn test_insert() {
+    let mut map: IdMapping<String, RandomState> =
+      IdMapping::with_capacity_and_hasher(10, RandomState::new());
+    map.insert("test1".to_string()).unwrap();
+    assert!(map.ext_to_int(&"test1".to_string()).is_ok());
+  }
+
+  #[test]
+  fn repeated_insert() {
+    let mut map: IdMapping<String, RandomState> =
+      IdMapping::with_capacity_and_hasher(10, RandomState::new());
+    let result1 = map.insert("test1".to_string()).unwrap();
+    let result2 = map.insert("test1".to_string()).unwrap();
+    assert_eq!(result1, result2);
+  }
+
+  #[test]
+  fn insert_delete_reuse_id() {
+    let mut map: IdMapping<String, RandomState> =
+      IdMapping::with_capacity_and_hasher(10, RandomState::new());
+    let result1 = map.insert("test1".to_string()).unwrap();
+    let x = "test1".to_string();
+    map.delete(result1).unwrap();
+    let result2 = map.insert("test1".to_string()).unwrap();
+    assert_eq!(result1, result2);
+  }
+
+  #[test]
+  fn serde_round_trip() {
+    // Create IdMap and insert some values
+    let mut map: IdMapping<String, RandomState> =
+      IdMapping::with_capacity_and_hasher(10, RandomState::new());
+    map.insert("test1".to_string()).unwrap();
+    map.insert("test2".to_string()).unwrap();
+    map.insert("test3".to_string()).unwrap();
+
+    // Serialize to a JSON string
+    let serialized = serde_json::to_string(&map).unwrap();
+
+    // Deserialize back into an IdMap
+    let mut deserialized: IdMapping<String, RandomState> =
+      serde_json::from_str(&serialized).unwrap();
+
+    // Check that the deserialized map contains the values
+    assert_eq!(
+      map.ext_to_int(&"test1".to_string()).unwrap(),
+      deserialized.ext_to_int(&"test1".to_string()).unwrap()
+    );
+    assert_eq!(
+      map.ext_to_int(&"test2".to_string()).unwrap(),
+      deserialized.ext_to_int(&"test2".to_string()).unwrap()
+    );
+    assert_eq!(
+      map.ext_to_int(&"test3".to_string()).unwrap(),
+      deserialized.ext_to_int(&"test3".to_string()).unwrap()
+    );
   }
 }
