@@ -19,6 +19,7 @@ thiserror = "1.0"
 criterion = "0.3"
 ordered-float = "3.0.0"
 nohash-hasher = "0.2.0"
+serde_json = "1.0"
 
 [[bench]]
 name = "benches"

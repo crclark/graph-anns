@@ -99,6 +99,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::BufWriter;
+use std::iter::FromIterator;
 
 mod edge;
 
@@ -211,7 +212,7 @@ fn convert_bruteforce_to_dense<
   dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
 ) -> Result<DenseKnnGraph<T, S>, Error> {
-  let ids = bf.contents.iter().collect();
+  let ids = bf.contents.drain().collect();
   let KnnInner::Large(g) = exhaustive_knn_graph(ids, config, dist_fn, prng)?.inner
   else {
     return Err(Error::InternalError(
@@ -222,16 +223,15 @@ fn convert_bruteforce_to_dense<
 }
 
 fn convert_dense_to_bruteforce<
+  'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone + Default,
 >(
-  g: &mut DenseKnnGraph<T, S>,
-) -> ExhaustiveKnn<T> {
-  let mut contents = HashSet::new();
-  for (ext_id, _) in g.mapping.external_to_internal_ids.drain() {
-    contents.insert(ext_id);
-  }
-  ExhaustiveKnn { contents }
+  g: DenseKnnGraph<T, S>,
+) -> Result<ExhaustiveKnn<T>, Error> {
+  let tmp = g.mapping.consume_and_get_exts()?;
+  let contents = HashSet::<T>::from_iter(tmp.into_iter());
+  Ok(ExhaustiveKnn { contents })
 }
 
 /// The primary data structure for approximate nearest neighbor search exposed
@@ -423,12 +423,16 @@ impl<
           == g.config.out_degree as usize + 1
         {
           let config = g.config.clone();
-          let mut small_g = convert_dense_to_bruteforce(g);
+          // BS to satisfy the borrow checker -- it doesn't know that we're
+          // dropping g immediately after this when we reassign *self.
+          let dummy = DenseKnnGraph::empty(config.clone());
+          let old_g = std::mem::replace(&mut *g, dummy);
+          let mut small_g = convert_dense_to_bruteforce(old_g)?;
           small_g.delete(x);
           *self = KnnInner::Small { g: small_g, config };
           Ok(())
         } else {
-          g.delete(x, dist_fn, prng)
+          g.delete(&x, dist_fn, prng)
         }
       }
     }
@@ -448,8 +452,11 @@ impl<
   }
 }
 
-impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
-  KnnInner<T, S>
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash,
+    S: BuildHasher + Clone + Default,
+  > KnnInner<T, S>
 {
   /// Initialize a new graph with the given configuration.
   pub fn new(config: KnnGraphConfig<S>) -> KnnInner<T, S> {
@@ -488,7 +495,7 @@ pub fn exhaustive_knn_graph<
   S: BuildHasher + Clone + Default,
   R: RngCore,
 >(
-  ids: Vec<&T>,
+  ids: Vec<T>,
   config: KnnGraphConfig<S>,
   dist_fn: &'a (dyn Fn(&T, &T) -> f32 + Sync),
   prng: &mut R,
@@ -579,13 +586,9 @@ mod tests {
     let mut config = mk_config(10);
     config.out_degree = 2;
     let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-    let g: DenseKnnGraph<u32, Nhh> = exhaustive_knn_graph_internal(
-      vec![&0, &1, &2, &3, &4, &5],
-      config,
-      dist_fn,
-      &mut prng,
-    )
-    .unwrap();
+    let ids = vec![0u32, 1, 2, 3, 4, 5];
+    let g: DenseKnnGraph<u32, Nhh> =
+      exhaustive_knn_graph_internal(ids, config, dist_fn, &mut prng).unwrap();
     g.consistency_check().unwrap();
     let SearchResults {
       approximate_nearest_neighbors: nearest_neighbors,
