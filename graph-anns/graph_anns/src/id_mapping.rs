@@ -10,6 +10,12 @@ use crate::error::Error;
 use std::marker::PhantomData;
 use std::{fmt, mem};
 
+// TODO: make IdMapping an enum, so that users can choose whether to use
+// the space-optimized version that uses Arc to store only one copy of
+// each external ID, or the version that uses a copy of each external ID
+// for each internal ID, which is faster because it avoids one extra pointer
+// dereference in the inner loop of the graph algorithm.
+
 #[derive(Clone)]
 pub struct IdMapping<T: Eq + std::hash::Hash, S: BuildHasher + Default> {
   capacity: usize,
@@ -207,9 +213,10 @@ where
   {
     let mut capacity = None;
     let mut next_int_id = None;
-    let mut i_to_e_and_e_to_i: Option<(
+    let mut i_to_e_and_e_to_i_and_deleted: Option<(
       Vec<Option<Arc<T>>>,
       HashMap<Arc<T>, u32, _>,
+      Vec<u32>,
     )> = None;
     while let Some(key) = map.next_key()? {
       match key {
@@ -226,22 +233,28 @@ where
           next_int_id = Some(map.next_value()?);
         }
         "internal_to_external_ids" => {
-          if i_to_e_and_e_to_i.is_some() {
+          if i_to_e_and_e_to_i_and_deleted.is_some() {
             return Err(serde::de::Error::duplicate_field(
               "internal_to_external_ids",
             ));
           }
-          // TODO: duplicate vecs -> 2x memory. Fix.
+
           let pairs: Vec<(u32, T)> = map.next_value()?;
-          let mut i_to_e = Vec::with_capacity(capacity.unwrap());
-          i_to_e.resize(pairs.len(), None);
-          let mut hash_map = HashMap::default();
-          for (i, t) in pairs {
+          let mut i_to_e = Vec::with_capacity(pairs.len());
+          let mut e_to_i = HashMap::default();
+
+          let mut deleted = Vec::new();
+          for (i, t) in pairs.into_iter() {
             let rc = Arc::new(t);
-            i_to_e[i as usize] = Some(Arc::clone(&rc));
-            hash_map.insert(rc, i);
+            while i_to_e.len() < (i as usize) {
+              deleted.push(i as u32);
+              i_to_e.push(None);
+            }
+            i_to_e.push(Some(Arc::clone(&rc)));
+            e_to_i.insert(rc, i);
           }
-          i_to_e_and_e_to_i = Some((i_to_e, hash_map));
+
+          i_to_e_and_e_to_i_and_deleted = Some((i_to_e, e_to_i, deleted));
         }
         _ => {
           return Err(serde::de::Error::unknown_field(
@@ -256,20 +269,10 @@ where
       capacity.ok_or_else(|| serde::de::Error::missing_field("capacity"))?;
     let next_int_id = next_int_id
       .ok_or_else(|| serde::de::Error::missing_field("next_int_id"))?;
-    let (internal_to_external_ids, external_to_internal_ids) =
-      i_to_e_and_e_to_i.ok_or_else(|| {
+    let (internal_to_external_ids, external_to_internal_ids, deleted) =
+      i_to_e_and_e_to_i_and_deleted.ok_or_else(|| {
         serde::de::Error::missing_field("internal_to_external_ids")
       })?;
-
-    // TODO: do this in the original pass over the serialized data, above.
-    // Reconstruct deleted Vec
-    let mut deleted = Vec::new();
-    for (i, item) in internal_to_external_ids.iter().enumerate().take(capacity)
-    {
-      if item.is_none() {
-        deleted.push(i as u32);
-      }
-    }
 
     Ok(IdMapping {
       capacity,
