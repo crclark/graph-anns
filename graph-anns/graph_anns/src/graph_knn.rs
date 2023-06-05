@@ -1169,7 +1169,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     if self.num_vertices() < self.config.out_degree as usize {
       return Err(Error::InternalError("graph is too small to delete a node while maintaining internal invariants".to_string()));
     };
-    let int_id = self.mapping.ext_to_int(&ext_id)?;
+    let int_id = self.mapping.ext_to_int(ext_id)?;
     let nbrs = get_edges_mut_macro!(self, int_id)
       .iter()
       .map(|e| *e.to)
@@ -1695,7 +1695,6 @@ mod tests {
       &mut prng,
     )
     .unwrap();
-    g.debug_print();
     g.delete(&3, dist_fn, &mut prng).unwrap();
     g.consistency_check().unwrap();
   }
