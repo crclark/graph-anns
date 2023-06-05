@@ -16,7 +16,10 @@ pub struct SearchResult<T> {
   /// The distance from the query point to this item.
   pub dist: f32,
 
-  pub(crate) search_root_ancestor: u32,
+  /// The internal identifier of the point closest to the query point that was
+  /// used as the starting point for the search. This is useful for debugging
+  /// and benchmarking.
+  pub search_root_ancestor: u32,
   pub(crate) search_depth: u32,
 }
 
