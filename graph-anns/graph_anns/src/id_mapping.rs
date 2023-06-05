@@ -296,32 +296,6 @@ mod tests {
   };
 
   #[test]
-  fn same_hash_borrowed_owned() {
-    let my_str = "test1".to_string();
-    let th = &Arc::new(&my_str);
-    let mut h = DefaultHasher::new();
-    th.hash(&mut h);
-    let th = &Arc::clone(th);
-    let mut h2 = DefaultHasher::new();
-    th.hash(&mut h2);
-    assert_eq!(h.finish(), h2.finish());
-  }
-
-  //TODO: delete; don't test std
-  #[test]
-  fn same_hash_for_same_string_contents() {
-    let my_str = "test1".to_string();
-    let my_str2 = "test1".to_string();
-    let th = Arc::new(&my_str);
-    let mut h = DefaultHasher::new();
-    th.hash(&mut h);
-    let th = Arc::new(&my_str2);
-    let mut h2 = DefaultHasher::new();
-    th.hash(&mut h2);
-    assert_eq!(h.finish(), h2.finish());
-  }
-
-  #[test]
   fn test_insert() {
     let mut map: IdMapping<String, RandomState> =
       IdMapping::with_capacity_and_hasher(10, RandomState::new());
