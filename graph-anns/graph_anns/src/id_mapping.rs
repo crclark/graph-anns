@@ -29,10 +29,6 @@ pub struct IdMapping<T: Eq + std::hash::Hash, S: BuildHasher + Default> {
 impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
   IdMapping<T, S>
 {
-  pub fn ext_ids_iter(&self) -> impl Iterator<Item = &T> {
-    self.external_to_internal_ids.keys().map(|x| x.as_ref())
-  }
-
   pub fn ext_int_iter(&self) -> impl Iterator<Item = (&T, u32)> {
     self
       .external_to_internal_ids
@@ -79,16 +75,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
     }
   }
 
-  /// Insert with a specified internal id. Only used for serde.
-  fn insert_ext_int(&mut self, x: T, i: u32) {
-    #![allow(clippy::unwrap_used)]
-    self.internal_to_external_ids[i as usize] = Some(Arc::new(x));
-    self.external_to_internal_ids.insert(
-      Arc::clone(self.internal_to_external_ids[i as usize].as_ref().unwrap()),
-      i,
-    );
-  }
-
   pub fn int_to_ext(&self, x: u32) -> Result<&T, Error> {
     match self.internal_to_external_ids.get(x as usize) {
       None => Err(Error::InternalError(format!("unknown internal id: {}", x))),
@@ -123,7 +109,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
     self
       .internal_to_external_ids
       .drain(..)
-      .filter_map(|x| x)
+      .flatten()
       .map(|x| match Arc::<T>::try_unwrap(x) {
         Ok(x) => Ok(x),
         Err(_) => Err(Error::InternalError(
@@ -211,6 +197,7 @@ where
   where
     V: MapAccess<'de>,
   {
+    #![allow(clippy::type_complexity)]
     let mut capacity = None;
     let mut next_int_id = None;
     let mut i_to_e_and_e_to_i_and_deleted: Option<(
@@ -247,7 +234,7 @@ where
           for (i, t) in pairs.into_iter() {
             let rc = Arc::new(t);
             while i_to_e.len() < (i as usize) {
-              deleted.push(i as u32);
+              deleted.push(i);
               i_to_e.push(None);
             }
             i_to_e.push(Some(Arc::clone(&rc)));
@@ -290,10 +277,7 @@ mod tests {
   extern crate serde_json;
 
   use super::*;
-  use std::{
-    collections::hash_map::{DefaultHasher, RandomState},
-    hash::Hasher,
-  };
+  use std::collections::hash_map::RandomState;
 
   #[test]
   fn test_insert() {
@@ -317,7 +301,6 @@ mod tests {
     let mut map: IdMapping<String, RandomState> =
       IdMapping::with_capacity_and_hasher(10, RandomState::new());
     let result1 = map.insert("test1".to_string()).unwrap();
-    let x = "test1".to_string();
     map.delete(result1).unwrap();
     let result2 = map.insert("test1".to_string()).unwrap();
     assert_eq!(result1, result2);
@@ -336,7 +319,7 @@ mod tests {
     let serialized = serde_json::to_string(&map).unwrap();
 
     // Deserialize back into an IdMap
-    let mut deserialized: IdMapping<String, RandomState> =
+    let deserialized: IdMapping<String, RandomState> =
       serde_json::from_str(&serialized).unwrap();
 
     // Check that the deserialized map contains the values

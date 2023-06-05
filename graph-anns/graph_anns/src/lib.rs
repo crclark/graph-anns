@@ -223,7 +223,6 @@ fn convert_bruteforce_to_dense<
 }
 
 fn convert_dense_to_bruteforce<
-  'a,
   T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone + Default,
 >(
@@ -452,11 +451,8 @@ impl<
   }
 }
 
-impl<
-    'a,
-    T: Clone + Ord + Eq + std::hash::Hash,
-    S: BuildHasher + Clone + Default,
-  > KnnInner<T, S>
+impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
+  KnnInner<T, S>
 {
   /// Initialize a new graph with the given configuration.
   pub fn new(config: KnnGraphConfig<S>) -> KnnInner<T, S> {
