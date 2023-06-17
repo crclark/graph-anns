@@ -63,32 +63,7 @@ impl<'a, T> std::ops::Index<usize> for Vecs<'a, T> {
   }
 }
 
-// TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
-// PrimitiveToF32 mess is necessary. .into() is much slower.
-
-pub trait PrimitiveToF32 {
-  fn tof32(self) -> f32;
-}
-
-impl PrimitiveToF32 for u8 {
-  fn tof32(self) -> f32 {
-    self as f32
-  }
-}
-
-impl PrimitiveToF32 for i32 {
-  fn tof32(self) -> f32 {
-    self as f32
-  }
-}
-
-impl PrimitiveToF32 for f32 {
-  fn tof32(self) -> f32 {
-    self
-  }
-}
-
-// NOTE: this gets auto-vectorized at opt-level 3 and is fastest
+// NOTE: this gets auto-vectorized at opt-level 3
 pub fn sq_euclidean_iter(v1: &[u8], v2: &[u8]) -> f32 {
   v1.iter().zip(v2.iter()).fold(0i32, |acc, (x, y)| {
     acc + (*x as i32 - *y as i32) * (*x as i32 - *y as i32)

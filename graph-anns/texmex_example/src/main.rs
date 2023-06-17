@@ -84,44 +84,7 @@ fn load_texmex_to_dense(
 
   let build_hasher = RandomState::new();
 
-  // TODO: re-run the time benchmarks below with  RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo run texmex_tests
-  // I was accidentally disabling optimizations when I ran the benchmarks below because I was mixing
-  // --release with RUSTFLAGS, and RUSTFLAGS was taking precedence.
-  // out_degree of 10 -> OOM. 7 -> 89.7 resident, slow insertion (310s per 100k).
-  // 5 -> ~80 resident, 200s per 100k insertion. 3 might be optimal.
-  // out_degree 3, num_searchers 5 -> ~45 resident, 40s per 100k.
-  // out_degree 3, num_searchers 5, rrnp=false -> ~45 resident, 40s per 100k -- i.e. rrnp makes no difference?
-  // TODO: collect stats on how much rrnp actually changes the graph on each insertion.
-  // higher num_searchers also kills insertion speed.
-  // TODO: should num_searchers be dynamic based on graph size? If small, don't
-  // need a lot.
-  //
-  // Parameter effects on search quality (recall@r):
-  // out_degree 7, num_searchers 7, rrnp false, lgd true -> 0.33 recall@10
-  // out_degree 7, num_searchers 7, rrnp true, lgd true -> 0.3038 recall@10
-  // out_degree 7, num_searchers 14, rrnp true, lgd true -> 0.31 recall@10
-  // out_degree 3, num_searchers 7, rrnp false, lgd true -> 0.0005 recall@10
-  // out_degree 15, num_searchers 7, rrnp false, lgd true -> 0.7062 recall@10
-  // out_degree 20, num_searchers 7, rrnp true, lgd true -> 0.79 recall@10, 1000s runtime
-  // out_degree 20, num_searchers 1, rrnp true, lgd true -> 0.78 recall@10, 1070s runtime
-  // out_degree 30, num_searchers 1, rrnp true, lgd true -> 0.87 recall@10, 1973s runtime
-  // out_degree 40, num_searchers 1, rrnp true, lgd true -> 0.91 recall@10, 3145s runtime
-  // TL;dr: higher out_degree has greatest effect on search quality. That's
-  // frustrating because it is also the greatest contributor to memory usage.
-  //
-  // Other performance observations:
-  //
-  // - Search speed degrades as the graph gets bigger (of course), but the rate
-  // of degradation is steeper for larger out_degree -- for small out_degree (e.g., 7),
-  // it's unnoticeable for 1M items, but for out_degree 20, inserting 100k items
-  // takes an additional 10s for each 100k items already in the graph. Oof.
-  // - For out_degree and num_searchers = 7, insertion speed starts to significantly
-  // degrade after 250M points have been inserted. So inserting the remaining points
-  // will take *at least* 1500 additional hours (assuming no further speed degradation)!
-  // We will need to split into multiple graphs (optionally managed by separate threads)
-  // to reach 1B points. The tradeoff to faster insertion may be slower search (or at least
-  // multithreaded search). Hmm. I think the benefit to insertion will far outweigh the
-  // slowdown at search time, which may not be too bad.
+  // NOTE: run the time benchmarks below with  RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo run texmex_tests
   let config = KnnGraphConfigBuilder::new(
     subset_size,
     out_degree,
@@ -136,11 +99,6 @@ fn load_texmex_to_dense(
   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
   let mut g = Knn::new(config, dist_fn);
 
-  // oops, this is irrelevant because we start out with the brute force
-  // implementation. So this is 19 microseconds. All of the real allocation is
-  // going to happen invisibly on one of the inserts. We should log the insert
-  // time of each insert to a CSV. We're going to see a *crazy* latency spike
-  // for one of the insertions.
   println!("Allocated graph in {:?}", start_allocate_graph.elapsed());
 
   let start_inserting = Instant::now();
@@ -259,9 +217,6 @@ fn open_csv(args: Args) -> LineWriter<File> {
 }
 
 fn main_single_threaded(args: Args) {
-  // TODO: this is absurdly slow to build a graph, even for just 1M elements.
-  // Optimize it. Focus on the stuff in lib; don't spend time optimizing the
-  // distance function unless there's something egregiously broken there.
   let subset_size: u32 = args.subset_size;
   let base_path = Path::new(&args.texmex_path);
   let base_vecs = texmex::Vecs::<u8>::new(base_path, 128).unwrap();
@@ -302,93 +257,6 @@ fn main_single_threaded(args: Args) {
   }
   pause();
 }
-
-// /// Just allocate the core data structures directly, fill them with junk, and
-// /// see what our RES is by pausing at the end. By process of elimination, we
-// /// can figure out what is going on here.
-// fn memory_usage_experiment(subset_size: usize, out_degree: usize) {
-//   let mut prng = Xoshiro256StarStar::seed_from_u64(1);
-
-//   let to = vec![0; subset_size * out_degree];
-
-//   let distance = vec![0.0; subset_size * out_degree];
-
-//   let crowding_factor = vec![0; subset_size * out_degree];
-
-//   let mut edges = EdgeVec {
-//     to,
-//     distance,
-//     crowding_factor,
-//   };
-
-//   for i in 0..subset_size * out_degree {
-//     let edge = edges.get_mut(i).unwrap();
-//     *edge.crowding_factor = 1;
-//     *edge.to = prng.next_u32() % subset_size as u32;
-//     *edge.distance = (prng.next_u32() % (subset_size as u32)) as f32;
-//   }
-
-//   let mut internal_to_external_ids = Vec::with_capacity(subset_size);
-//   for _ in 0..subset_size {
-//     internal_to_external_ids
-//       .push(Some(ID::Base(prng.next_u32() % subset_size as u32)));
-//   }
-
-//   let mut backpointers = Vec::with_capacity(subset_size);
-
-//   for i in 0..subset_size {
-//     backpointers.push(SetU32::new());
-//     // NOTE: nothing guarantees out_degree elements in backpointers. Could be
-//     // larger or smaller. This is a simplifying assumption.
-//     for _ in 0..out_degree {
-//       backpointers[i].insert(prng.next_u32() % subset_size as u32);
-//     }
-//   }
-
-//   //TODO: not sure if backpointers.mem_used already includes this. Try it both ways.
-//   let mut backpointers_total_mem = subset_size * mem::size_of::<SetU32>();
-
-//   for i in 0..subset_size {
-//     backpointers_total_mem += backpointers[i].mem_used();
-//   }
-
-//   let struct_of_arrays_expected_size =
-//     out_degree * subset_size * mem::size_of::<u32>()
-//       + out_degree * subset_size * mem::size_of::<f32>()
-//       + out_degree * subset_size * mem::size_of::<u8>();
-
-//   let internal_to_external_ids_expected_size =
-//     subset_size as usize * mem::size_of::<Option<ID>>() as usize;
-
-//   println!(
-//     "struct of arrays should be {}",
-//     struct_of_arrays_expected_size
-//   );
-
-//   println!(
-//     "The internal_to_external_ids mapping should take {}",
-//     internal_to_external_ids_expected_size,
-//   );
-
-//   // NOTE: this is an extreme underestimation.
-//   println!(
-//     "backpointers expected size (SIGNIFICANTLY UNDERESTIMATED): {}",
-//     backpointers_total_mem
-//   );
-
-//   println!(
-//     "total expected size: {}",
-//     struct_of_arrays_expected_size
-//       + internal_to_external_ids_expected_size
-//       + backpointers_total_mem
-//   );
-
-//   pause();
-// }
-
-// fn main_mem() {
-//   memory_usage_experiment(5_000_000, 7);
-// }
 
 /// A simple wrapper around a Vec of RwLocks of graphs to provide a basic
 /// parallel insert/search interface.
@@ -620,7 +488,6 @@ fn load_texmex_to_dense_par(
     start_inserting.elapsed()
   );
 
-  //println!("Graph size: {:?}", g.debug_size_stats());
   g
 }
 
