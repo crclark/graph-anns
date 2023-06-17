@@ -116,9 +116,6 @@ mod search_results;
 pub use search_results::*;
 
 mod id_mapping;
-mod space_report;
-pub use space_report::*;
-
 // TODO: revisit every use of `pub` in this file.
 
 // TODO: many benchmarking utilities. Recall@n  metrics and so forth.
@@ -159,10 +156,6 @@ impl<T: Clone + Eq + std::hash::Hash> ExhaustiveKnn<T> {
     ExhaustiveKnn {
       contents: HashSet::new(),
     }
-  }
-
-  fn debug_size_stats(&self) -> SpaceReport {
-    SpaceReport::default()
   }
 
   fn insert(&mut self, x: T) {
@@ -343,12 +336,6 @@ impl<
   pub fn debug_consistency_check(&self) -> Result<(), Error> {
     self.inner.debug_consistency_check()
   }
-
-  /// Returns information about the length and capacity of all data structures
-  /// in the graph.
-  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
-    self.inner.debug_size_stats()
-  }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -465,15 +452,6 @@ impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     match self {
       KnnInner::Small { .. } => Ok(()),
       KnnInner::Large(g) => g.consistency_check(),
-    }
-  }
-
-  /// Returns information about the length and capacity of all data structures
-  /// in the graph.
-  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
-    match self {
-      KnnInner::Small { g, .. } => Ok(g.debug_size_stats()),
-      KnnInner::Large(g) => g.debug_size_stats(),
     }
   }
 }

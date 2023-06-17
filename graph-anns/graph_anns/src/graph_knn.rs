@@ -16,8 +16,6 @@ use edge::*;
 
 use id_mapping::*;
 
-use space_report::*;
-
 use error::*;
 
 const DEFAULT_LAMBDA: u8 = 0;
@@ -397,64 +395,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 {
   fn num_vertices(&self) -> usize {
     self.mapping.len()
-  }
-
-  fn has_edge(&self, from: u32, to: u32) -> Result<bool, Error> {
-    Ok(self.get_edges(from)?.iter().any(|e| *e.to == to))
-  }
-
-  fn count_reciprocated_edges(&self) -> Result<usize, Error> {
-    let mut count = 0;
-    for (i, _) in self.mapping.int_ext_iter() {
-      for e in self.get_edges(i)? {
-        if self.has_edge(*e.to, i)? {
-          count += 1;
-        }
-      }
-    }
-    Ok(count)
-  }
-
-  /// Returns information about the length and capacity of all data structures
-  /// in the graph.
-  pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
-    Ok(SpaceReport {
-      mapping_int_ext_len: self.mapping.len(),
-      // TODO: fix or delete
-      mapping_int_ext_capacity: 0,
-      mapping_ext_int_len: 0,
-      mapping_ext_int_capacity: 0,
-      mapping_deleted_len: 0,
-      mapping_deleted_capacity: 0,
-      edges_vec_len: self.edges.len(),
-      edges_vec_capacity: self.edges.capacity(),
-      backpointers_len: self.backpointers.len(),
-      backpointers_capacity: self.backpointers.capacity(),
-      backpointers_sets_sum_len: self
-        .backpointers
-        .iter()
-        .map(|s| s.len())
-        .sum(),
-      backpointers_sets_sum_capacity: self
-        .backpointers
-        .iter()
-        .map(|s| s.capacity())
-        .sum(),
-      backpointers_sets_mem_used: 0,
-      backpointers_smallest_set_len: self
-        .backpointers
-        .iter()
-        .map(|s| s.len())
-        .min()
-        .unwrap_or(0),
-      backpointers_largest_set_len: self
-        .backpointers
-        .iter()
-        .map(|s| s.len())
-        .max()
-        .unwrap_or(0),
-      num_reciprocated_edges: self.count_reciprocated_edges()?,
-    })
   }
 
   /// Allocates a graph of the specified size and out_degree, but
