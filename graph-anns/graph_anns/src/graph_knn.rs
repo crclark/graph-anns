@@ -732,8 +732,9 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
             item: *w.to,
             internal_id: Some(*w.to),
             dist: *v.distance + *w.distance,
-            // TODO: these fields are nonsense in this context
-            // should they be Option?
+            // NOTE: these fields are nonsense in this context, but it's
+            // convenient to use SearchResult as a container for the
+            // information we need.
             search_root_ancestor: *w.to,
             search_depth: 2,
           }));
@@ -1098,8 +1099,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     for (r_int, r_dist) in &visited_nodes_distances_to_q {
       let r_int = *r_int;
-      // TODO: collect stats on how often is_inserted is true and how many
-      // times we call insert_edge_if_closer. This could be a big waste of time.
       let is_inserted = self.insert_edge_if_closer(r_int, q_int, *r_dist)?;
       let r_edges = get_edges_mut_macro!(self, r_int);
       if is_inserted && self.config.use_lgd {
@@ -1246,12 +1245,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
     Ok(())
   }
-
-  // TODO: return fewer than expected results if num_searchers or k is
-  // higher than num_vertices.
-
-  // TODO: tests for graph where n is not divisible by k, where n is very small,
-  // etc.
 
   // TODO: wouldn't returning a min-dist heap be more useful?
 
@@ -1429,9 +1422,6 @@ mod tests {
   use std::hash::BuildHasherDefault;
 
   type Nhh = BuildHasherDefault<NoHashHasher<u32>>;
-
-  // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
-  // PrimitiveToF32 mess is necessary. .into() is much slower.
 
   pub trait PrimitiveToF32 {
     fn tof32(self) -> f32;

@@ -89,9 +89,6 @@ pub struct SearchStats {
   pub nearest_neighbor_path_length: usize,
   /// The total number of nodes visited during the search.
   pub num_visited: usize,
-  // TODO
-  // /// The distance from the nearest neighbor to the starting point that the searcher that found it started from.
-  // pub distance_from_nearest_neighbor_to_its_starting_point: f32,
 }
 
 impl SearchStats {
