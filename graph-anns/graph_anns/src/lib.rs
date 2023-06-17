@@ -146,9 +146,6 @@ pub trait NN<T> {
 struct ExhaustiveKnn<T: Eq + std::hash::Hash> {
   /// All inserted elements.
   pub contents: HashSet<T>,
-  // TODO: made this Sync so that I could share a single closure across threads
-  // when splitting up a graph into multiple pieces. Is this going to be onerous
-  // to users?
 }
 
 impl<T: Clone + Eq + std::hash::Hash> ExhaustiveKnn<T> {
@@ -496,10 +493,6 @@ mod tests {
 
   type Nhh = BuildHasherDefault<NoHashHasher<u32>>;
 
-  // TODO: see commit 5a2b1254fe058c1d23a52d6f16f02158e31744e2 for why this
-  // PrimitiveToF32 mess is necessary. .into() is much slower. Verify that this
-  // is still the case.
-
   pub trait PrimitiveToF32 {
     fn tof32(self) -> f32;
   }
@@ -573,7 +566,7 @@ mod tests {
         .iter()
         .map(|x| (x.item, x.dist))
         .collect::<Vec<(u32, f32)>>(),
-      vec![(1u32, 0.0), (0, 0.9 * 0.9)] //TODO: make test not depend on fp equality
+      vec![(1u32, 0.0), (0, 0.9 * 0.9)]
     );
   }
 

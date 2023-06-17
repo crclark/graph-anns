@@ -10,12 +10,6 @@ use crate::error::Error;
 use std::marker::PhantomData;
 use std::{fmt, mem};
 
-// TODO: make IdMapping an enum, so that users can choose whether to use
-// the space-optimized version that uses Arc to store only one copy of
-// each external ID, or the version that uses a copy of each external ID
-// for each internal ID, which is faster because it avoids one extra pointer
-// dereference in the inner loop of the graph algorithm.
-
 #[derive(Serialize, Deserialize)]
 pub enum IdMapping<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default> {
   #[serde(bound(
