@@ -103,6 +103,11 @@ pub struct KnnGraphConfig<S: BuildHasher + Clone + Default> {
   // takes no memory if this is set to false.
   /// Whether to use lazy graph diversification. This improves search speed.
   pub(crate) use_lgd: bool,
+
+  /// If true, optimize element storage for speed. If true, optimize for memory.
+  /// Internally, this controls whether IdMapping uses Arc to reduce copies, or
+  /// just stores T inline in each data structure.
+  pub(crate) optimize_for_small_type: bool,
 }
 
 impl<S: BuildHasher + Clone + Default> KnnGraphConfig<S> {
@@ -155,6 +160,14 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfig<S> {
   pub fn use_lgd(&self) -> bool {
     self.use_lgd
   }
+
+  /// If true, optimize for speed by reducing pointer indirections, but stores each
+  /// T twice. If false, optimize for memory by storing each T only once, but
+  /// increasing pointer indirections. Rule of thumb: set to true if T is 64 bits
+  /// or smaller, or if memory usage is not a concern.
+  pub fn optimize_for_small_type(&self) -> bool {
+    self.optimize_for_small_type
+  }
 }
 
 /// Builder for [KnnGraphConfig].
@@ -195,6 +208,7 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfigBuilder<S> {
         use_rrnp: true,
         rrnp_max_depth: 2,
         use_lgd: true,
+        optimize_for_small_type: false,
       },
     }
   }
@@ -220,6 +234,7 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfigBuilder<S> {
         use_rrnp: true,
         rrnp_max_depth: 2,
         use_lgd: true,
+        optimize_for_small_type: false,
       },
     }
   }
@@ -273,6 +288,18 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfigBuilder<S> {
   /// Whether to use lazy graph diversification. This improves search speed.
   pub fn use_lgd(mut self, use_lgd: bool) -> KnnGraphConfigBuilder<S> {
     self.config.use_lgd = use_lgd;
+    self
+  }
+
+  /// If true, optimize for speed by reducing pointer indirections, but stores each
+  // T twice. If false, optimize for memory by storing each T only once, but
+  // increase pointer indirections. Rule of thumb: set to true if T is 64 bits
+  // or smaller, or if memory usage is not a concern.
+  pub fn optimize_for_small_type(
+    mut self,
+    optimize_for_small_type: bool,
+  ) -> KnnGraphConfigBuilder<S> {
+    self.config.optimize_for_small_type = optimize_for_small_type;
     self
   }
 
@@ -334,7 +361,7 @@ macro_rules! get_edges_macro {
 /// Nodes are u32s numbered from 0 to n-1.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct DenseKnnGraph<
-  T: Eq + std::hash::Hash,
+  T: Clone + Eq + std::hash::Hash,
   S: BuildHasher + Clone + Default,
 > {
   /// A mapping from the user's ID type, T, to our internal ids, which are u32.
@@ -378,12 +405,10 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
   fn count_reciprocated_edges(&self) -> Result<usize, Error> {
     let mut count = 0;
-    for (i, v) in self.mapping.internal_to_external_ids.iter().enumerate() {
-      if v.is_some() {
-        for e in self.get_edges(i as u32)? {
-          if self.has_edge(*e.to, i as u32)? {
-            count += 1;
-          }
+    for (i, _) in self.mapping.int_ext_iter() {
+      for e in self.get_edges(i)? {
+        if self.has_edge(*e.to, i)? {
+          count += 1;
         }
       }
     }
@@ -394,18 +419,13 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   /// in the graph.
   pub fn debug_size_stats(&self) -> Result<SpaceReport, Error> {
     Ok(SpaceReport {
-      mapping_int_ext_len: self.mapping.internal_to_external_ids.len(),
-      mapping_int_ext_capacity: self
-        .mapping
-        .internal_to_external_ids
-        .capacity(),
-      mapping_ext_int_len: self.mapping.external_to_internal_ids.len(),
-      mapping_ext_int_capacity: self
-        .mapping
-        .external_to_internal_ids
-        .capacity(),
-      mapping_deleted_len: self.mapping.deleted.len(),
-      mapping_deleted_capacity: self.mapping.deleted.capacity(),
+      mapping_int_ext_len: self.mapping.len(),
+      // TODO: fix or delete
+      mapping_int_ext_capacity: 0,
+      mapping_ext_int_len: 0,
+      mapping_ext_int_capacity: 0,
+      mapping_deleted_len: 0,
+      mapping_deleted_capacity: 0,
       edges_vec_len: self.edges.len(),
       edges_vec_capacity: self.edges.capacity(),
       backpointers_len: self.backpointers.len(),
@@ -440,10 +460,17 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   /// Allocates a graph of the specified size and out_degree, but
   /// doesn't populate the edges.
   pub(crate) fn empty(config: KnnGraphConfig<S>) -> DenseKnnGraph<T, S> {
-    let mapping = IdMapping::<T, S>::with_capacity_and_hasher(
-      config.capacity as usize,
-      config.build_hasher.clone(),
-    );
+    let mapping = if config.optimize_for_small_type() {
+      IdMapping::with_capacity_and_hasher_copy(
+        config.capacity,
+        config.build_hasher.clone(),
+      )
+    } else {
+      IdMapping::with_capacity_and_hasher_arc(
+        config.capacity,
+        config.build_hasher.clone(),
+      )
+    };
 
     let to = vec![0; config.capacity as usize * config.out_degree as usize];
 
@@ -480,12 +507,6 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   /// >= capacity or does not exist.
   pub fn get_edges(&self, index: u32) -> Result<EdgeSlice, Error> {
     if index >= self.config.capacity {
-      return Err(Error::InternalError(format!(
-        "index {} does not exist in internal ids",
-        index
-      )));
-    };
-    if (index as usize) >= self.mapping.internal_to_external_ids.len() {
       return Err(Error::InternalError(format!(
         "index {} does not exist in internal ids",
         index
@@ -563,16 +584,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     int_id2: u32,
     dist_fn: &dyn Fn(&T, &T) -> f32,
   ) -> Result<f32, Error> {
-    let ext_id1 = self.mapping.internal_to_external_ids[int_id1 as usize]
-      .as_ref()
-      .ok_or(Error::InternalError(
-        "Failed to get external id in dist_int".to_string(),
-      ))?;
-    let ext_id2 = self.mapping.internal_to_external_ids[int_id2 as usize]
-      .as_ref()
-      .ok_or(Error::InternalError(
-        "Failed to get external id in dist_int".to_string(),
-      ))?;
+    let ext_id1 = self.mapping.int_to_ext(int_id1)?;
+    let ext_id2 = self.mapping.int_to_ext(int_id2)?;
     Ok(dist_fn(ext_id1, ext_id2))
   }
 
@@ -674,20 +687,20 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
   #[allow(dead_code)]
   pub fn debug_print(&self) -> Result<(), Error> {
     println!("### Adjacency list (index, distance, lambda)");
-    for i in 0..self.mapping.internal_to_external_ids.len() {
+    for (i, _) in self.mapping.int_ext_iter() {
       println!("Node {i}");
       println!(
         "{:#?}",
         self
-          .get_edges(i as u32)?
+          .get_edges(i)?
           .iter()
           .map(|e| (e.to, e.distance, e.crowding_factor))
           .collect::<Vec<_>>()
       );
     }
     println!("### Backpointers");
-    for i in 0..self.mapping.internal_to_external_ids.len() {
-      println!("Node {} {:#?}", i, self.backpointers[i]);
+    for (i, _) in self.mapping.int_ext_iter() {
+      println!("Node {} {:#?}", i, self.backpointers[i as usize]);
     }
     Ok(())
   }
@@ -705,13 +718,13 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
       )));
     }
 
-    for i in self.mapping.external_to_internal_ids.values() {
-      for e in self.get_edges(*i)? {
-        if *e.to == (*i) {
+    for (i, _) in self.mapping.int_ext_iter() {
+      for e in self.get_edges(i)? {
+        if *e.to == i {
           return Err(Error::InternalError(format!("Self loop at node {}", i)));
         }
         let nbr_backptrs = &self.backpointers[*e.to as usize];
-        if !nbr_backptrs.contains(i) {
+        if !nbr_backptrs.contains(&i) {
           return Err(Error::InternalError(format!(
             "Vertex {} links to {} but {}'s backpointers don't include {}!",
             i, *e.to, *e.to, i
@@ -721,7 +734,7 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 
       if !(IsSorted::is_sorted_by_key(
         &mut self
-          .get_edges(*i)?
+          .get_edges(i)?
           .iter()
           .map(|e| (*e.to, *e.distance, *e.crowding_factor)),
         |e| e.1,
@@ -732,8 +745,8 @@ impl<'a, T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
         )));
       };
 
-      for referrer in self.backpointers[*i as usize].iter() {
-        if !(self.debug_get_neighbor_indices(*referrer)?.contains(i)) {
+      for referrer in self.backpointers[i as usize].iter() {
+        if !(self.debug_get_neighbor_indices(*referrer)?.contains(&i)) {
           return Err(Error::InternalError(format!(
             "Vertex {} has a backpointer to {} but {}'s neighbors don't include {}!",
             i, *referrer, *referrer, i
@@ -1418,18 +1431,22 @@ pub(crate) fn exhaustive_knn_graph_internal<
     let _i = g.mapping.insert(i_ext)?;
   }
 
-  let mapping_clone = g.mapping.clone(); // TODO: ffs
+  let ext_ints: Vec<(T, u32)> = g
+    .mapping
+    .ext_int_iter()
+    .map(|x| (x.0.clone(), x.1))
+    .collect::<Vec<_>>();
 
-  for (i_ext, i) in mapping_clone.ext_int_iter() {
+  for (i_ext, i) in ext_ints.iter() {
     let mut knn = BinaryHeap::new();
     // TODO: prng in config.
-    g.maybe_insert_starting_point(i, prng);
-    for (j_ext, j) in mapping_clone.ext_int_iter() {
+    g.maybe_insert_starting_point(*i, prng);
+    for (j_ext, j) in ext_ints.iter() {
       if i_ext == j_ext {
         continue;
       }
       let dist = dist_fn(i_ext, j_ext);
-      knn.push(SearchResult::new(j, Some(j), dist, 0, 0));
+      knn.push(SearchResult::new(j, Some(*j), dist, 0, 0));
 
       while knn.len() > config.out_degree as usize {
         knn.pop();
@@ -1439,16 +1456,16 @@ pub(crate) fn exhaustive_knn_graph_internal<
       let SearchResult { item: id, dist, .. } = knn
         .pop()
         .ok_or(Error::InternalError("heap unexpectedly empty".to_string()))?;
-      let mut i_edges_mut = g.get_edges_mut(i)?;
+      let mut i_edges_mut = g.get_edges_mut(*i)?;
       let e = i_edges_mut.get_mut(edge_ix).ok_or(Error::InternalError(
         "i_edges_mut unexpectedly empty".to_string(),
       ))?;
 
-      *e.to = id;
+      *e.to = *id;
       *e.distance = dist;
       *e.crowding_factor = DEFAULT_LAMBDA;
-      let s = &mut g.backpointers[id as usize];
-      s.push(i);
+      let s = &mut g.backpointers[*id as usize];
+      s.push(*i);
     }
   }
 
@@ -1524,6 +1541,7 @@ mod tests {
     let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
+    let optimize_for_small_type = false;
     KnnGraphConfig::<Nhh> {
       capacity,
       out_degree,
@@ -1532,6 +1550,7 @@ mod tests {
       use_rrnp,
       rrnp_max_depth,
       use_lgd,
+      optimize_for_small_type,
     }
   }
 
