@@ -418,9 +418,7 @@ impl<
         Ok(())
       }
       KnnInner::Large(g) => {
-        if g.mapping.external_to_internal_ids.len()
-          == g.config.out_degree as usize + 1
-        {
+        if g.mapping.len() == g.config.out_degree as usize + 1 {
           let config = g.config.clone();
           // BS to satisfy the borrow checker -- it doesn't know that we're
           // dropping g immediately after this when we reassign *self.
@@ -563,6 +561,7 @@ mod tests {
     let rrnp_max_depth = 2;
     let use_lgd = false;
     let build_hasher = nohash_hasher::BuildNoHashHasher::default();
+    let optimize_for_small_type = true;
     KnnGraphConfig::<Nhh> {
       capacity,
       out_degree,
@@ -571,6 +570,7 @@ mod tests {
       use_rrnp,
       rrnp_max_depth,
       use_lgd,
+      optimize_for_small_type,
     }
   }
 
@@ -641,129 +641,132 @@ mod tests {
     };
     for use_rrnp in [false, true] {
       for use_lgd in [false, true] {
-        let s = RandomState::new();
-        let config = KnnGraphConfig {
-          capacity: 50,
-          out_degree: 5,
-          num_searchers: 5,
-          build_hasher: s,
-          use_rrnp,
-          rrnp_max_depth: 2,
-          use_lgd,
-        };
+        for optimize_for_small_type in [false, true] {
+          let s = RandomState::new();
+          let config = KnnGraphConfig {
+            capacity: 50,
+            out_degree: 5,
+            num_searchers: 5,
+            build_hasher: s,
+            use_rrnp,
+            rrnp_max_depth: 2,
+            use_lgd,
+            optimize_for_small_type,
+          };
 
-        let mut prng = Xoshiro256StarStar::seed_from_u64(1);
+          let mut prng = Xoshiro256StarStar::seed_from_u64(1);
 
-        let mut g = Knn::new(config, dist_fn);
-        g.insert(
-          vec![
-            NotNan::new(1f32).unwrap(),
-            NotNan::new(2f32).unwrap(),
-            NotNan::new(3f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(2f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-            NotNan::new(5f32).unwrap(),
-            NotNan::new(6f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(3f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-            NotNan::new(5f32).unwrap(),
-            NotNan::new(12f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(23f32).unwrap(),
-            NotNan::new(14f32).unwrap(),
-            NotNan::new(45f32).unwrap(),
-            NotNan::new(142f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(37f32).unwrap(),
-            NotNan::new(45f32).unwrap(),
-            NotNan::new(53f32).unwrap(),
-            NotNan::new(122f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(13f32).unwrap(),
-            NotNan::new(14f32).unwrap(),
-            NotNan::new(555f32).unwrap(),
-            NotNan::new(125f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(13f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-            NotNan::new(53f32).unwrap(),
-            NotNan::new(12f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-        g.insert(
-          vec![
-            NotNan::new(33f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-            NotNan::new(53f32).unwrap(),
-            NotNan::new(312f32).unwrap(),
-          ],
-          &mut prng,
-        )
-        .unwrap();
-
-        let SearchResults {
-          approximate_nearest_neighbors: nearest_neighbors,
-          ..
-        } = g
-          .query(
-            &vec![
-              NotNan::new(34f32).unwrap(),
-              NotNan::new(5f32).unwrap(),
-              NotNan::new(53f32).unwrap(),
-              NotNan::new(312f32).unwrap(),
+          let mut g = Knn::new(config, dist_fn);
+          g.insert(
+            vec![
+              NotNan::new(1f32).unwrap(),
+              NotNan::new(2f32).unwrap(),
+              NotNan::new(3f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
             ],
-            1,
             &mut prng,
           )
           .unwrap();
-        assert_eq!(
-          nearest_neighbors
-            .iter()
-            .map(|x| (x.item.clone(), x.dist))
-            .collect::<Vec<(Vec<NotNan<f32>>, f32)>>()[0]
-            .0,
-          vec![
-            NotNan::new(33f32).unwrap(),
-            NotNan::new(4f32).unwrap(),
-            NotNan::new(53f32).unwrap(),
-            NotNan::new(312f32).unwrap(),
-          ]
-        );
+          g.insert(
+            vec![
+              NotNan::new(2f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
+              NotNan::new(5f32).unwrap(),
+              NotNan::new(6f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(3f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
+              NotNan::new(5f32).unwrap(),
+              NotNan::new(12f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(23f32).unwrap(),
+              NotNan::new(14f32).unwrap(),
+              NotNan::new(45f32).unwrap(),
+              NotNan::new(142f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(37f32).unwrap(),
+              NotNan::new(45f32).unwrap(),
+              NotNan::new(53f32).unwrap(),
+              NotNan::new(122f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(13f32).unwrap(),
+              NotNan::new(14f32).unwrap(),
+              NotNan::new(555f32).unwrap(),
+              NotNan::new(125f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(13f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
+              NotNan::new(53f32).unwrap(),
+              NotNan::new(12f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+          g.insert(
+            vec![
+              NotNan::new(33f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
+              NotNan::new(53f32).unwrap(),
+              NotNan::new(312f32).unwrap(),
+            ],
+            &mut prng,
+          )
+          .unwrap();
+
+          let SearchResults {
+            approximate_nearest_neighbors: nearest_neighbors,
+            ..
+          } = g
+            .query(
+              &vec![
+                NotNan::new(34f32).unwrap(),
+                NotNan::new(5f32).unwrap(),
+                NotNan::new(53f32).unwrap(),
+                NotNan::new(312f32).unwrap(),
+              ],
+              1,
+              &mut prng,
+            )
+            .unwrap();
+          assert_eq!(
+            nearest_neighbors
+              .iter()
+              .map(|x| (x.item.clone(), x.dist))
+              .collect::<Vec<(Vec<NotNan<f32>>, f32)>>()[0]
+              .0,
+            vec![
+              NotNan::new(33f32).unwrap(),
+              NotNan::new(4f32).unwrap(),
+              NotNan::new(53f32).unwrap(),
+              NotNan::new(312f32).unwrap(),
+            ]
+          );
+        }
       }
     }
   }
