@@ -156,7 +156,6 @@ fn load_texmex_to_dense(
     "Finished building the nearest neighbors graph in {:?}",
     start_inserting.elapsed()
   );
-  println!("Graph size: {:?}", g.debug_size_stats());
   g
 }
 
@@ -440,15 +439,6 @@ impl<
       graphs.push(RwLock::new(Knn::new(config, dist_fn)));
     }
     ManyKnn { graphs }
-  }
-
-  pub fn debug_size_stats(&self) -> SpaceReport {
-    self
-      .graphs
-      .iter()
-      .map(|g| g.read().unwrap().debug_size_stats().unwrap())
-      .reduce(|acc, e| acc.merge(&e))
-      .unwrap()
   }
 
   pub fn save(&self, path: &str) {

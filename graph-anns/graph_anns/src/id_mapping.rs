@@ -167,8 +167,6 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
         }
         self.next_int_id += 1;
 
-        // TODO: we are storing two clones of x. Replace with a bidirectional
-        // map or something to reduce memory usage.
         self.internal_to_external_ids[x_int as usize] = Some(x.clone());
         self.external_to_internal_ids.insert(x.clone(), x_int);
         Ok(x_int)
