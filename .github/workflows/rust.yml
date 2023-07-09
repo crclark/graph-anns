@@ -16,7 +16,23 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Lint with Clippy
+      run: cargo clippy -- -D warnings
+
     - name: Build
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
