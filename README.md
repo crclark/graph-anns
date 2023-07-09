@@ -6,9 +6,8 @@ described in
 Construction: A Generic Online Approach," in IEEE Transactions on Multimedia,
 vol. 24, pp. 1909-1921, 2022, doi: 10.1109/TMM.2021.3073811.
 
-This library is intended to be a flexible component in a system that
-uses approximate nearest neighbor search. It is not a complete system
-on its own, and requires a bit of glue code to be useful.
+This library is intended to be a flexible foundation for a system that
+uses approximate nearest neighbor search.
 
 Interesting features include:
 - A generic interface for nearest neighbor search on arbitrary distance
