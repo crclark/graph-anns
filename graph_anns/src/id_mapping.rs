@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::error::Error;
 
+use std::fmt;
 use std::marker::PhantomData;
-use std::{fmt, mem};
 
 #[derive(Serialize, Deserialize)]
 pub enum IdMapping<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default> {
@@ -292,8 +292,7 @@ impl<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Default>
   }
 
   pub fn delete(&mut self, x_int: u32) -> Result<u32, Error> {
-    let x =
-      mem::replace(&mut self.internal_to_external_ids[x_int as usize], None);
+    let x = self.internal_to_external_ids[x_int as usize].take();
     let x = x.ok_or_else(|| {
       Error::InternalError(format!("unknown external id: {}", x_int))
     })?;
