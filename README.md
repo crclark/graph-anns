@@ -19,7 +19,7 @@ functions.
 
 To get started, use the `KnnGraphConfigBuilder` to create a new nearest
 neighbor search structure with `Knn::new`. For vectors of floats, you can use
-the ordered_float crate to ensure that your floats are not NaN and to
+the `ordered_float` crate to ensure that your floats are not NaN and to
 satisfy the trait requirements of this library.
 
 Minimal example:
