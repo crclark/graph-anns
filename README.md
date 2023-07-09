@@ -1,10 +1,11 @@
 An implementation of the approximate nearest-neighbor search data structure
-and algorithms
-described in
+and algorithms described in
 
 > W. -L. Zhao, H. Wang and C. -W. Ngo, "Approximate k-NN Graph
 Construction: A Generic Online Approach," in IEEE Transactions on Multimedia,
 vol. 24, pp. 1909-1921, 2022, doi: 10.1109/TMM.2021.3073811.
+
+(I have no affiliation with the authors of the paper.)
 
 This library is intended to be a flexible foundation for a system that
 uses approximate nearest neighbor search.

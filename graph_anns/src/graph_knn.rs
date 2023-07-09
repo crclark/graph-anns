@@ -267,7 +267,7 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfigBuilder<S> {
     self
   }
 
-  /// Whether to use restricted recursive neighborhood propagation. This improves
+  /// Whether to use restricted recursive neighborhood propagation. In our tests, this improves
   /// search speed by about 10%, but decreases insertion throughput by about 10%.
   pub fn use_rrnp(mut self, use_rrnp: bool) -> KnnGraphConfigBuilder<S> {
     self.config.use_rrnp = use_rrnp;
@@ -290,9 +290,9 @@ impl<S: BuildHasher + Clone + Default> KnnGraphConfigBuilder<S> {
   }
 
   /// If true, optimize for speed by reducing pointer indirections, but stores each
-  // T twice. If false, optimize for memory by storing each T only once, but
-  // increase pointer indirections. Rule of thumb: set to true if T is 64 bits
-  // or smaller, or if memory usage is not a concern.
+  /// `T` twice. If false, optimize for memory by storing each `T` only once, but
+  /// increase pointer indirections. Rule of thumb: set to true if `T` is 64 bits
+  /// or smaller, or if memory usage is not a concern.
   pub fn optimize_for_small_type(
     mut self,
     optimize_for_small_type: bool,
