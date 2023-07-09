@@ -1,5 +1,3 @@
-#![feature(is_sorted)]
-#![feature(portable_simd)]
 extern crate atomic_float;
 extern crate clap;
 extern crate graph_anns;
