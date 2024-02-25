@@ -753,6 +753,7 @@ dependencies = [
  "rand",
  "rand_core",
  "rand_xoshiro",
+ "rayon",
  "serde",
  "serde_json",
  "soa_derive",

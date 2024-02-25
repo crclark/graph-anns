@@ -19,6 +19,7 @@ thiserror = "1.0"
 pyo3 = { version = "0.20.2", features = ["extension-module"] }
 numpy = "0.20.0"
 nohash-hasher = "0.2.0"
+rayon = "1.5.1"
 
 # stuff for python bindings
 [lib]
