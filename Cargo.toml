@@ -1,5 +1,5 @@
 [workspace]
-members = ["graph_anns", "texmex_example"]
+members = ["graph_anns", "py_graph_anns", "texmex_example"]
 
 [profile.release]
 debug = true

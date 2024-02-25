@@ -142,7 +142,7 @@ pub trait NN<T> {
 }
 
 /// A nearest neighbor search data structure that uses exhaustive search.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct ExhaustiveKnn<T: Eq + std::hash::Hash> {
   /// All inserted elements.
   pub contents: HashSet<T>,
@@ -335,6 +335,18 @@ impl<
   }
 }
 
+impl<
+    'a,
+    T: Clone + Ord + Eq + std::hash::Hash + std::fmt::Debug,
+    S: BuildHasher + Clone + Default,
+  > Knn<'a, T, S>
+{
+  /// Print the graph to stdout. Used for debugging this library.
+  pub fn debug_print(&self) {
+    self.inner.debug_print();
+  }
+}
+
 #[derive(Deserialize, Serialize)]
 enum KnnInner<T: Clone + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
 {
@@ -449,6 +461,23 @@ impl<T: Clone + Ord + Eq + std::hash::Hash, S: BuildHasher + Clone + Default>
     match self {
       KnnInner::Small { .. } => Ok(()),
       KnnInner::Large(g) => g.consistency_check(),
+    }
+  }
+}
+
+impl<
+    T: Clone + Ord + Eq + std::hash::Hash + std::fmt::Debug,
+    S: BuildHasher + Clone + Default,
+  > KnnInner<T, S>
+{
+  pub fn debug_print(&self) {
+    match self {
+      KnnInner::Small { g, .. } => {
+        println!("Small graph: {:?}", g.contents);
+      }
+      KnnInner::Large(g) => {
+        g.debug_print();
+      }
     }
   }
 }

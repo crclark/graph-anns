@@ -16,3 +16,5 @@ Cargo.lock
 *.pdb
 
 .cargo/
+
+py_graph_anns/.env/
